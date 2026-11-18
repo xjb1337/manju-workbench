@@ -1,0 +1,56 @@
+{
+  "name": "manju-workbench",
+  "version": "1.0.0",
+  "private": true,
+  "description": "本地漫剧制作工作台",
+  "author": "Manju Workbench",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "npm run build && npm start",
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "npm run compile:main && vite build",
+    "test": "npm run compile:main && node --test tests/*.test.cjs",
+    "verify:desktop": "node tests/desktop.cjs",
+    "pack:win": "npm run build && electron-builder --win nsis --x64",
+    "compile:main": "tsc -p tsconfig.main.json",
+    "pack:win:native": "node scripts/pack-native.cjs"
+  },
+  "build": {
+    "appId": "local.manju.workbench",
+    "productName": "漫剧工作台",
+    "files": [
+      "dist/**/*",
+      "package.json",
+      "resources/sample/*.jpg"
+    ],
+    "artifactName": "Manju-Workbench-${version}-${arch}-Setup.${ext}",
+    "win": {
+      "target": "nsis",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "directories": {
+      "output": "release"
+    }
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@phosphor-icons/react": "^2.1.10",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "electron": "^45.3.4",
+    "electron-builder": "^26.18.0",
+    "playwright": "^1.65.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  }
+}
