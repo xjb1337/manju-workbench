@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import {
   ArrowSquareOut, BookOpen, Check, FilmSlate, Copy, DownloadSimple, FilmStrip, FolderOpen, Image as ImageIcon,
   Moon, Play, Plus, Sun, Trash, WarningCircle, X, MapPin, UsersThree, FloppyDisk, FileText,
@@ -11,6 +11,7 @@ import {
 import { productionProgress, type StepId } from '../shared/production'
 import { Badge, MediaRow, Modal, NameModal, TextEditor, Timeline, kindLabel, mediaUrl, sequence } from './components'
 import { ProductionGuide, isMediaStep } from './ProductionGuide'
+import { UpdatePanel } from './UpdatePanel'
 
 type Tab = 'shots' | 'script' | Category
 type EditorField = 'shot-prompt' | 'shot-video-prompt' | 'shot-dialogue'
@@ -50,6 +51,7 @@ export function App() {
   const step = guideStep ?? guide?.recommended ?? 'export'
 
   useEffect(() => api.onProgress(setProgress), [])
+  useLayoutEffect(() => { void api.setEditorDirty(dirty).catch(() => {}) }, [dirty])
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? 'dark' : 'light'
   }, [dark])
@@ -269,6 +271,7 @@ export function App() {
         <button className="subtle" onClick={() => navigate(() => addProject(false))} disabled={busy}><Plus size={17} /> 新建作品</button>
         <button className="subtle" onClick={() => navigate(() => void run(() => api.open(), next => { if (next) load(next) }))} disabled={busy}><FolderOpen size={18} /> 打开作品</button>
         <span className="separator" />
+        <UpdatePanel busy={busy} dirty={dirty} />
         <button className="icon subtle" aria-label={dark ? '切换浅色' : '切换深色'} title={dark ? '切换浅色' : '切换深色'}
           onClick={() => setDark(!dark)}>{dark ? <Sun size={19} /> : <Moon size={19} />}</button>
       </div>

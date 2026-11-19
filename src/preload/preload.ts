@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { RenderProgress, Workbench } from '../shared/api'
+import type { RenderProgress, UpdateProgress, Workbench } from '../shared/api'
 
 const bridge: Workbench = {
   open: () => ipcRenderer.invoke('project:open'),
@@ -16,5 +16,16 @@ const bridge: Workbench = {
     ipcRenderer.on('episode:progress', handler)
     return () => ipcRenderer.removeListener('episode:progress', handler)
   },
+  checkUpdate: () => ipcRenderer.invoke('update:check'),
+  downloadUpdate: () => ipcRenderer.invoke('update:download'),
+  cancelUpdate: () => ipcRenderer.invoke('update:cancel'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
+  openUpdateFolder: () => ipcRenderer.invoke('update:open-folder'),
+  onUpdateProgress: listener => {
+    const handler = (_event: Electron.IpcRendererEvent, value: UpdateProgress) => listener(value)
+    ipcRenderer.on('update:progress', handler)
+    return () => ipcRenderer.removeListener('update:progress', handler)
+  },
+  setEditorDirty: dirty => ipcRenderer.invoke('app:editor-dirty', dirty),
 }
 contextBridge.exposeInMainWorld('workbench', bridge)

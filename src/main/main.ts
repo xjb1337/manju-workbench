@@ -11,6 +11,8 @@ import { mediaResponse } from './media-protocol'
 import { exportDestination, renderEpisode } from './render'
 import { fillSample } from './sample'
 import { allVersions, findEpisode, ProjectStore } from './storage'
+import { createProductionUpdater } from './update-system'
+import type { Updater } from './updater'
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'manju-media', privileges: { standard: true, secure: true, stream: true } }])
 const html = path.join(__dirname, '../renderer/index.html')
@@ -24,6 +26,10 @@ let preview: { directory: string; file: string; id: string } | null = null
 let operation: Promise<unknown> | undefined
 let job: { controller: AbortController; publishing: boolean } | null = null
 let quitting = false
+let updater: Updater
+let editorDirty = false
+let confirmingInstall = false
+let installerStarted = false
 
 function diagnose(error: unknown) {
   if (error instanceof z.ZodError) {
@@ -45,7 +51,7 @@ function handle<T>(channel: string, fn: (win: BrowserWindow, ...args: unknown[])
   ipcMain.handle(channel, async (event, ...args): Promise<Reply<T>> => {
     const win = window
     if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame
-      || event.senderFrame?.url !== rendererUrl || quitting) return { ok: false, error: '操作不可用' }
+      || event.senderFrame?.url !== rendererUrl || quitting || installerStarted) return { ok: false, error: '操作不可用' }
     try {
       return { ok: true, value: await fn(win, ...args) }
     } catch (error) {
@@ -81,6 +87,39 @@ function getStore(key: unknown) {
 }
 
 function wire() {
+  handle('app:editor-dirty', (_win, value) => { editorDirty = z.boolean().parse(value); return null })
+  handle('update:check', () => updater.check())
+  handle('update:download', win => updater.download(value => {
+    if (!win.isDestroyed()) win.webContents.send('update:progress', value)
+  }))
+  handle('update:cancel', () => updater.cancel())
+  handle('update:open-folder', async () => {
+    await updater.openPortable(async directory => {
+      if (await shell.openPath(directory)) throw new Error('无法打开更新包所在目录')
+    })
+    return null
+  })
+  handle('update:install', win => serial(async () => {
+    if (editorDirty) throw new Error('请先保存修改，再安装更新')
+    confirmingInstall = true
+    try {
+      const started = await updater.install(async () => {
+        const response = await dialog.showMessageBox(win, {
+          type: 'warning', title: '安装更新', message: '关闭工作台并启动安装程序？',
+          detail: '应用未签名。SHA-256 仅验证文件完整性，无法证明发布者身份。',
+          buttons: ['取消', '关闭并安装'], defaultId: 0, cancelId: 0, noLink: true,
+        })
+        if (editorDirty) throw new Error('请先保存修改，再安装更新')
+        return response.response === 1
+      })
+      if (!started) return 'canceled' as const
+      installerStarted = true
+      setImmediate(() => { if (!win.isDestroyed()) win.close() })
+      return 'started' as const
+    } finally {
+      confirmingInstall = false
+    }
+  }))
   handle('project:create', (win, title, sample) => serial(async () => {
     const name = folderNameSchema.parse(title)
     const fictional = z.boolean().parse(sample)
@@ -207,12 +246,14 @@ function createWindow() {
   win.webContents.on('will-navigate', event => event.preventDefault())
   win.webContents.on('will-attach-webview', event => event.preventDefault())
   win.webContents.on('will-prevent-unload', event => {
+    if (installerStarted) return
     const response = dialog.showMessageBoxSync(win, {
       type: 'warning', title: '退出工作台', message: '退出会放弃未保存的修改或中断当前操作。',
       buttons: ['返回', '退出'], defaultId: 0, cancelId: 0,
     })
     if (response === 1) event.preventDefault()
   })
+  win.on('close', event => { if (confirmingInstall) event.preventDefault() })
   win.on('closed', () => { window = null })
   void win.loadFile(html)
 }
@@ -223,12 +264,14 @@ if (app.requestSingleInstanceLock()) {
     Menu.setApplicationMenu(null)
     session.defaultSession.setPermissionCheckHandler(() => false)
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
+    updater = createProductionUpdater()
     wire()
     createWindow()
   })
   app.on('window-all-closed', () => {
     quitting = true
     if (!job?.publishing) job?.controller.abort()
-    void Promise.resolve(operation).catch(() => {}).then(dropPreview).finally(() => app.quit())
+    void Promise.allSettled([Promise.resolve(operation).catch(() => {}).then(dropPreview), updater.dispose()])
+      .finally(() => app.quit())
   })
 } else app.quit()

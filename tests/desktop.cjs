@@ -5,6 +5,7 @@ const { copyFile, mkdir, mkdtemp, readFile, rename, stat, writeFile, readdir } =
 const { tmpdir } = require('node:os')
 const path = require('node:path')
 const { _electron: electron } = require('playwright')
+const { notes: updateNotes, releaseFixture, startUpdateFixture } = require('./update-fixture.cjs')
 
 const repository = path.resolve(__dirname, '..')
 const run = path.resolve(process.env.MANJU_RUN_DIR ?? path.join(tmpdir(), 'manju-workbench'))
@@ -42,8 +43,8 @@ async function fixtureFiles(folder) {
   return { files, replacement }
 }
 
-async function launch(profile) {
-  const app = await electron.launch({ executablePath: require('electron'), args: [repository, `--user-data-dir=${profile}`], timeout: 20_000 })
+async function launch(profile, entry = repository, env = process.env) {
+  const app = await electron.launch({ executablePath: require('electron'), args: [entry, `--user-data-dir=${profile}`], env, timeout: 20_000 })
   app.process().stderr.on('data', data => {
     const message = data.toString().trim()
     if (message.includes('project:import') || message.includes('episode:render') || message.includes('project:create')) console.error(message)
@@ -104,6 +105,107 @@ async function addAsset(app, page, label, input, scope = page) {
   await button(scope, `导入${label}`).last().click()
   await page.getByLabel(`${label}活动版本`).waitFor({ timeout: 20_000 })
   await footerSaved(page)
+}
+
+async function verifyUpdates(folder, project) {
+  const fixture = releaseFixture()
+  const temp = path.join(folder, '更新临时目录')
+  await mkdir(temp)
+  const server = await startUpdateFixture()
+  let desktop
+  try {
+    desktop = await launch(path.join(folder, '更新验收配置'), path.join(__dirname, 'desktop-update-entry.cjs'), {
+      ...process.env, MANJU_UPDATE_FIXTURE_ORIGIN: server.origin, MANJU_UPDATE_FIXTURE_TEMP: temp,
+    })
+    const { app, page } = desktop
+    const panel = page.getByRole('dialog', { name: '应用更新', exact: true })
+    await app.evaluate(({ dialog }) => {
+      globalThis.updateConfirmations = 0
+      dialog.showMessageBox = async (_window, options) => {
+        if (options.title !== '安装更新' || options.defaultId !== 0 || options.cancelId !== 0) throw new Error('Unexpected confirmation')
+        globalThis.updateConfirmations++
+        return { response: 0 }
+      }
+    })
+    await choose(app, project)
+    await button(page, '打开作品').first().click()
+    await guide(page).waitFor()
+    await button(page, '检查更新').waitFor()
+    assert.deepEqual(server.state.requests, [])
+    await screenshot(page, 'update-01-entry.png')
+    await button(page, '检查更新').click()
+    await panel.getByText('暂无发布', { exact: true }).waitFor()
+    await panel.getByText('1.0.0', { exact: true }).waitFor()
+    assert.equal(await button(panel, '下载').count(), 0)
+    await screenshot(page, 'update-02-no-release.png')
+    await button(panel, '关闭').click()
+
+    Object.assign(server.state, { releases: [fixture.release], paths: fixture.paths, stalledPath: fixture.assetPath })
+    async function checkNewVersion() {
+      await button(page, '检查更新').click()
+      await panel.getByText('发现新版本 1.2.0', { exact: true }).waitFor()
+      assert.equal(await panel.locator('.update-notes p').textContent(), updateNotes)
+      assert.equal(await panel.locator('.update-notes p strong').count(), 0)
+      await panel.getByText('应用未签名。SHA-256 仅验证文件完整性，无法证明发布者身份。', { exact: true }).waitFor()
+      assert.equal(await button(panel, '下载').isEnabled(), true)
+      assert.equal(await button(panel, '安装').isDisabled(), true)
+    }
+    await checkNewVersion()
+    await screenshot(page, 'update-03-available-light.png')
+    await button(panel, '关闭').click()
+    await button(page, '切换深色').click()
+    await checkNewVersion()
+    await screenshot(page, 'update-04-available-dark.png')
+
+    await button(panel, '下载').click()
+    const progress = panel.getByRole('progressbar', { name: '下载进度' })
+    await progress.waitFor()
+    await page.waitForFunction(() => document.querySelector('dialog progress')?.value === 25)
+    await screenshot(page, 'update-05-progress-dark.png')
+    await button(panel, '取消下载').click()
+    await panel.getByText('已取消下载', { exact: true }).waitFor()
+    assert.deepEqual(await readdir(temp), [])
+    assert.equal(await button(panel, '安装').isDisabled(), true)
+
+    server.state.stalledPath = ''
+    await button(panel, '下载').click()
+    await panel.getByText('已通过完整性校验', { exact: false }).waitFor()
+    assert.equal(await button(panel, '安装').isEnabled(), true)
+    await screenshot(page, 'update-06-verified-dark.png')
+    await button(panel, '安装').click()
+    await button(panel, '安装').waitFor()
+    await page.waitForFunction(() => !Array.from(document.querySelectorAll('dialog button')).find(button => button.textContent === '安装')?.disabled)
+    assert.equal(await app.evaluate(() => globalThis.updateConfirmations), 1)
+    assert.deepEqual(await app.evaluate(() => globalThis.updateLaunches), [])
+    await button(panel, '关闭').click()
+
+    await button(directory(page), '剧本').click()
+    const script = stage(page).locator('form.text-editor textarea')
+    const before = await script.inputValue()
+    const requests = server.state.requests.length
+    await script.fill('虚构验收 · 尚未保存')
+    await page.locator('footer').getByText('有未保存修改', { exact: true }).waitFor()
+    await button(page, '检查更新').click()
+    await button(panel, '安装').click()
+    await panel.getByRole('alert').getByText('请先保存修改，再安装更新。', { exact: true }).waitFor()
+    await screenshot(page, 'update-07-unsaved-dark.png')
+    assert.deepEqual(await page.evaluate(() => window.workbench.installUpdate()), { ok: false, error: '请先保存修改，再安装更新' })
+    assert.equal(await app.evaluate(() => globalThis.updateConfirmations), 1)
+    assert.deepEqual(await app.evaluate(() => globalThis.updateLaunches), [])
+    assert.equal(server.state.requests.length, requests)
+    await button(panel, '返回保存').click()
+    assert.equal(await script.inputValue(), '虚构验收 · 尚未保存')
+    await script.fill(before)
+    await footerSaved(page)
+    await guide(page).waitFor()
+    console.log('更新夹具验收通过：无后台检查，暂无发布，发现新版本，纯文本说明，下载取消及校验，安装确认取消，未保存修改保护')
+  } catch (error) {
+    await desktop?.page.screenshot({ path: path.join(folder, 'diagnostic-update-failure.png'), timeout: 3000 }).catch(() => {})
+    throw error
+  } finally {
+    await desktop?.app.close().catch(() => {})
+    await server.close()
+  }
 }
 
 async function verifyGuideTools(app, page) {
@@ -531,11 +633,16 @@ async function main() {
     await guide(page).getByText('静默 1 镜', { exact: true }).waitFor()
     assert.deepEqual(await documentAt(projectFile), finalManifest)
     assert.ok((await readdir(project)).every(name => !name.startsWith('.manju-render-')))
+    await app.close()
+    await verifyUpdates(folder, project)
+    assert.deepEqual(await documentAt(projectFile), finalManifest)
     await writeFile(path.join(folder, 'acceptance.json'), JSON.stringify({
       project, destination, sha256: sha, restartedElectron: true, replacementStillActive: track.versions[1].id,
       dialogCanceledPreservedHash: true, renderCanceledPreservedHash: true, missingAssetPreservedHash: true,
       temporaryDirectoriesCleaned: true, guideEmptyPartialComplete: true, guideExternalStubAndClipboard: true,
       guidePerEpisodeAndStaleAfterRestart: true, skippedVideoAndAudioRetainCaptions: true,
+      updateFixtureNoReleaseAndNewVersion: true, updateFixtureCanceledAndVerified: true,
+      updateFixtureNativeConfirmationCanceledAndDirtyBlocked: true,
     }, null, 2))
     await writeFile(path.join(verify, 'latest-success.txt'), folder + '\n')
     console.log('已有 MP4 保留，取消对话框 / 编码中取消 / 第四镜缺源三条路径 SHA-256 一致：', sha)

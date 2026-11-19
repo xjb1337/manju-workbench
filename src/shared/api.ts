@@ -14,6 +14,14 @@ export type RenderResult =
   | { status: 'completed'; mode: 'preview'; location: string }
   | { status: 'completed'; mode: 'export'; location: string; project: Project }
   | { status: 'record-failed'; location: string }
+export type UpdateKind = 'setup' | 'portable'
+export type UpdateCheck = { currentVersion: string } & (
+  | { status: 'none' }
+  | { status: 'latest'; version: string; notes: string }
+  | { status: 'available'; version: string; notes: string; kind: UpdateKind | null; unavailable?: string }
+)
+export type UpdateProgress = { received: number; total: number }
+export type UpdateDownload = { status: 'canceled' } | { status: 'ready'; fileName: string }
 export interface Workbench {
   open(): Promise<Reply<OpenProject | null>>
   create(title: string, sample: boolean): Promise<Reply<OpenProject | null>>
@@ -25,4 +33,11 @@ export interface Workbench {
   render(key: string, episodeId: string, mode: RenderProgress['mode']): Promise<Reply<RenderResult>>
   cancelRender(): Promise<Reply<boolean>>
   onProgress(listener: (event: RenderProgress) => void): () => void
+  checkUpdate(): Promise<Reply<UpdateCheck>>
+  downloadUpdate(): Promise<Reply<UpdateDownload>>
+  cancelUpdate(): Promise<Reply<boolean>>
+  installUpdate(): Promise<Reply<'started' | 'canceled'>>
+  openUpdateFolder(): Promise<Reply<null>>
+  onUpdateProgress(listener: (event: UpdateProgress) => void): () => void
+  setEditorDirty(dirty: boolean): Promise<Reply<null>>
 }

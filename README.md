@@ -54,3 +54,13 @@ npm run pack:win:native -- /path/to/makensis release/win-unpacked release/Manju-
 ```
 
 这个安装程序按用户安装到 `%LOCALAPPDATA%\Programs\Manju Workbench`，并创建开始菜单入口和卸载项。也可用 Electron Builder 的 `portable` 目标生成免安装版本。
+
+## 更新发布清单
+
+标题栏的「检查更新」按需读取 `xjb1337/manju-workbench` 的正式 GitHub Release。标签使用 `1.2.3` 或 `v1.2.3`。每个版本随附件提供 `Manju-Workbench-1.2.3-win-x64.manifest.json`（UTF-8 JSON）。
+
+- 根对象包含 `schemaVersion`（数字 `1`）、`version`（例如字符串 `"1.2.3"`）和 `assets`（数组）。
+- 每条附件包含 `fileName`、`size`（字节数）、`sha256`（64 位十六进制）和 `kind`。打包完成后记录最终文件的大小和摘要。PowerShell 可用 `(Get-Item -LiteralPath $file).Length` 和 `(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash`。
+- `setup` 使用自定义 NSIS 产物 `Manju-Workbench-1.2.3-x64-Setup.exe`。`portable` 使用 `Manju-Workbench-1.2.3-x64-Portable.exe` 或 `Manju-Workbench-1.2.3-x64-Portable.zip`。每种类型最多一份，名称须与附件逐字匹配。
+
+更新器仅对识别出的自定义 NSIS 安装提供「安装」。便携版与其他打包的 Windows x64 目录可下载便携包并自行替换。已校验的便携包保留在系统临时目录。应用未签名，SHA-256 仅用于校验文件完整性。
