@@ -7,6 +7,7 @@ import {
 export const kinds = ['image', 'video', 'audio'] as const
 export const statuses = ['待制作', '待审核', '已通过'] as const
 export const kindSchema = z.enum(kinds)
+export const projectSchemaVersion = 2
 export type MediaKind = z.infer<typeof kindSchema>
 export const idSchema = z.uuid()
 export const titleSchema = z.string().trim().min(1, '名称不能为空').max(100, '名称最多 100 个字符')
@@ -24,7 +25,7 @@ export const versionSchema = z.object({
   extension: z.enum(['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov', 'webm', 'wav', 'mp3', 'm4a', 'ogg', 'flac']),
   createdAt: z.iso.datetime(),
   seconds: finiteSeconds.optional(),
-  hasAudio: z.literal(true).optional(),
+  hasAudio: z.boolean().optional(),
   needsUpdate: z.literal(true).optional(),
 })
 export type Version = z.infer<typeof versionSchema>
@@ -66,7 +67,7 @@ const referenceSchema = z.object({ id: idSchema, title: titleSchema, notes, imag
 export type Reference = z.infer<typeof referenceSchema>
 
 export const projectSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.union([z.literal(1), z.literal(projectSchemaVersion)]),
   id: idSchema,
   title: titleSchema,
   fictional: z.boolean(),
@@ -153,6 +154,13 @@ export function activeVersion(track: Track) {
 
 export function shotMedia(shot: Shot, kind: MediaKind, method: ShotMethod = shot.method ?? 'flow') {
   return shot.omittedMedia?.[kind] || !usesTrack(method, kind) ? undefined : activeVersion(shot.media[kind])
+}
+
+export function shotVisual(shot: Shot, method: ShotMethod) {
+  const video = shotMedia(shot, 'video', method)
+  if (video) return { kind: 'video', version: video } as const
+  const image = shotMedia(shot, 'image', method)
+  if (image) return { kind: 'image', version: image } as const
 }
 
 export function totalFrames(episode: Episode) {

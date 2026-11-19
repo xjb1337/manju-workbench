@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { ArrowSquareOut, Copy, FloppyDisk } from '@phosphor-icons/react'
 import {
-  defaultMethod, detailLabels, frameSpec, methodLabels, ratioSchema, workTypeLabels, workTypeSchema,
-  type Brief, type DetailKind, type Ratio, type WorkType,
+  defaultMethod, detailLabels, frameSpec, generationKindSchema, generationLabels, generationPresets, generationToolUrl,
+  methodLabels, ratioSchema, workTypeLabels, workTypeSchema,
+  type Brief, type DetailKind, type GenerationKind, type GenerationTool, type Ratio, type WorkType,
 } from '../shared/creative'
 import type { Episode, Mutation, Project, Shot } from '../shared/model'
-import { maxPlanCharacters, type PlanPreview } from '../shared/plan'
+import { magpieBaseUrl, magpieDefaultModel, magpieModelSchema, magpieScriptSchema, maxPlanCharacters, type PlanPreview } from '../shared/plan'
 import { briefFields, missingBrief, planningPrompt, shotPromptBody, shotPromptContext, shotPromptText } from '../shared/prompts'
 import { Badge, Modal } from './components'
 
@@ -14,10 +15,12 @@ type CopyText = (text: string, failure: Failure) => Promise<boolean>
 type BriefChange = Extract<Mutation, { type: 'project.brief' }>
 type DetailAction = Extract<Mutation, { type: 'shot.detail' }>['action']
 const briefTextFields = ['theme', 'audience', 'style', 'language', 'tools', 'terms'] as const
+const generationKinds = generationKindSchema.options
+const emptyTool: GenerationTool = { name: '', url: '' }
 
-export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, onImport }: {
+export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, onImport, onMagpie }: {
   project: Project; episode?: Episode; busy: boolean; onDirty: (dirty: boolean) => void
-  onSave: (change: BriefChange) => void; onPlan: () => void; onImport: () => void
+  onSave: (change: BriefChange) => void; onPlan: () => void; onImport: () => void; onMagpie: () => void
 }) {
   function fields() {
     return {
@@ -25,19 +28,45 @@ export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, on
       target: String(project.brief?.targetSeconds ?? ''),
       ratio: frameSpec(project).ratio,
       text: Object.fromEntries(briefTextFields.map(key => [key, project.brief?.[key] ?? ''])) as Record<typeof briefTextFields[number], string>,
+      generation: { image: project.brief?.generation?.image ?? emptyTool, video: project.brief?.generation?.video ?? emptyTool },
     }
   }
   const [draft, setDraft] = useState(fields)
+  const [toolErrors, setToolErrors] = useState<Partial<Record<GenerationKind, string>>>({})
   const saved = fields()
-  const dirty = draft.workType !== saved.workType || draft.ratio !== saved.ratio || draft.target !== saved.target
+  const targetSeconds = draft.target ? Number(draft.target) : undefined
+  const normalizedTool = (kind: GenerationKind) => ({ name: draft.generation[kind].name.trim(), url: draft.generation[kind].url.trim() })
+  const dirty = draft.workType !== saved.workType || draft.ratio !== saved.ratio || targetSeconds !== project.brief?.targetSeconds
     || briefTextFields.some(key => draft.text[key].trim() !== saved.text[key])
+    || generationKinds.some(kind => {
+      const tool = normalizedTool(kind)
+      return tool.name !== saved.generation[kind].name || tool.url !== saved.generation[kind].url
+    })
   useEffect(() => { onDirty(dirty); return () => onDirty(false) }, [dirty, onDirty])
-  const tentative: Brief = { ...draft.text, ratio: draft.ratio, targetSeconds: draft.target ? Number(draft.target) : undefined }
+  const tentative: Brief = { ...draft.text, ratio: draft.ratio, targetSeconds }
   const spec = frameSpec({ brief: tentative })
   const missing = missingBrief(tentative)
+  function setTool(kind: GenerationKind, tool: GenerationTool) {
+    setDraft(current => ({ ...current, generation: { ...current.generation, [kind]: tool } }))
+    setToolErrors(current => ({ ...current, [kind]: undefined }))
+  }
   function save(event: FormEvent) {
     event.preventDefault()
-    onSave({ type: 'project.brief', workType: draft.workType, brief: tentative })
+    const generation: NonNullable<Brief['generation']> = {}
+    const errors: typeof toolErrors = {}
+    for (const kind of generationKinds) {
+      const tool = normalizedTool(kind)
+      const parsed = generationToolUrl.safeParse(tool.url)
+      if (!parsed.success) errors[kind] = parsed.error.issues[0].message
+      else if (tool.name || tool.url) generation[kind] = tool
+    }
+    setToolErrors(errors)
+    const invalid = generationKinds.find(kind => errors[kind])
+    if (invalid) {
+      document.getElementById(`generation-${invalid}-url`)?.focus()
+      return
+    }
+    onSave({ type: 'project.brief', workType: draft.workType, brief: { ...tentative, generation } })
   }
   return <main className="stage wide">
     <div className="stage-heading"><h2>制作简报</h2></div>
@@ -62,11 +91,36 @@ export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, on
               </label>
             })}
           </div>
+          <section className="generation-settings" aria-labelledby="generation-heading">
+            <h3 id="generation-heading">生成工具</h3>
+            <p className="generation-help">可自由搭配生图和视频工具。本地软件只需填写名称，填写网址后可从制作步骤打开。</p>
+            {generationKinds.map(kind => {
+              const label = `${generationLabels[kind]}工具`
+              const tool = draft.generation[kind]
+              const prefix = `generation-${kind}`
+              return <div key={kind} className="generation-settings-row" role="group" aria-labelledby={`${prefix}-label`}>
+                <div className="generation-settings-head">
+                  <h4 id={`${prefix}-label`}>{label}</h4>
+                  <button type="button" className="small subtle accent" onClick={() => setTool(kind, generationPresets[kind])}>
+                    使用 {generationPresets[kind].name}
+                  </button>
+                </div>
+                <div className="brief-grid">
+                  <label className="field">{label}名称<input id={`${prefix}-name`} maxLength={80} value={tool.name}
+                    onChange={event => setTool(kind, { ...tool, name: event.target.value })} /></label>
+                  <label className="field">{label}网址<input id={`${prefix}-url`} type="url" maxLength={2048} value={tool.url}
+                    aria-invalid={!!toolErrors[kind]} aria-describedby={toolErrors[kind] ? `${prefix}-error` : undefined}
+                    onChange={event => setTool(kind, { ...tool, url: event.target.value })} /></label>
+                </div>
+                {toolErrors[kind] && <p id={`${prefix}-error`} className="inline-error" role="alert">{toolErrors[kind]}</p>}
+              </div>
+            })}
+          </section>
           <div className="brief-save"><button className="primary" type="submit" disabled={!dirty}><FloppyDisk size={16} /> 保存简报</button></div>
         </fieldset>
       </form>
-      <section className="planning-panel" aria-label="外部规划">
-        <div className="section-head"><h3>外部规划</h3><Badge value={spec.ratio} /></div>
+      <section className="planning-panel" aria-label="分镜规划">
+        <div className="section-head"><h3>分镜规划</h3><Badge value={spec.ratio} /></div>
         <dl className="planning-spec">
           <div><dt>画布</dt><dd>{spec.width} × {spec.height} · 30 fps</dd></div>
           <div><dt>默认制作方式</dt><dd>{methodLabels[defaultMethod(draft.workType)]}</dd></div>
@@ -76,8 +130,9 @@ export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, on
           <ul>{(missing.length ? missing : ['无']).map(item => <li key={item}>{item}</li>)}</ul>
         </div>
         <div className="plan-buttons">
+          <button className="primary" disabled={busy || dirty} onClick={onMagpie}>AI 生成分镜草案</button>
           <button disabled={busy || dirty} onClick={onPlan}>总规划提示词</button>
-          <button disabled={busy || dirty} className="primary" onClick={onImport}>导入外部规划</button>
+          <button disabled={busy || dirty} onClick={onImport}>导入外部规划</button>
         </div>
       </section>
       {project.plan && <section className="plan-results" aria-label="规划成果">
@@ -101,7 +156,7 @@ export function PlanningDialog({ project, episode, busy, copy, openTool, close }
       <textarea className="long-prompt" readOnly aria-label="总规划提示词内容" value={text} rows={15} />
       {error && <p className="inline-error" role="alert">{error}</p>}
       <div className="dialog-actions"><span role="status" className="dialog-status">{notice}</span>
-        <button disabled={busy} onClick={() => openTool(setError)}>打开 ChatGPT <ArrowSquareOut size={15} /></button>
+        <button disabled={busy} onClick={() => openTool(setError)}>用 ChatGPT 做规划 <ArrowSquareOut aria-hidden="true" size={15} /></button>
         <button disabled={busy} onClick={close}>关闭</button>
         <button className="primary" disabled={busy} onClick={async () => {
           setError('')
@@ -112,21 +167,31 @@ export function PlanningDialog({ project, episode, busy, copy, openTool, close }
   </Modal>
 }
 
-export function PlanImportDialog({ episode, fictional, busy, onPreview, onMerge, close }: {
+type PlanSource =
+  | { kind: 'paste'; preview: (text: string, accept: (preview: PlanPreview) => void, failure: Failure) => void }
+  | { kind: 'magpie'; script: string; preview: (model: string, script: string, accept: (preview: PlanPreview | null) => void, failure: Failure) => void;
+      cancel: (failure: Failure) => void }
+
+export function PlanImportDialog({ episode, fictional, busy, source, onMerge, close }: {
   episode?: Episode; fictional: boolean; busy: boolean; close: () => void
-  onPreview: (text: string, accept: (preview: PlanPreview) => void, failure: Failure) => void
+  source: PlanSource
   onMerge: (preview: PlanPreview, replacements: string[], failure: Failure) => void
 }) {
-  const [text, setText] = useState('')
+  const [text, setText] = useState(source.kind === 'magpie' ? source.script : '')
+  const [model, setModel] = useState(magpieDefaultModel)
   const [preview, setPreview] = useState<PlanPreview>()
   const [replacements, setReplacements] = useState<string[]>([])
   const [error, setError] = useState('')
+  const [stopped, setStopped] = useState(false)
   const back = useRef<HTMLButtonElement>(null)
   useEffect(() => { if (preview && !busy) back.current?.focus() }, [preview, busy])
-  return <Modal title={preview ? '规划导入预览' : '导入外部规划'} onClose={close}>
+  const magpie = source.kind === 'magpie' ? source : undefined
+  const title = magpie ? (preview ? 'AI 分镜草案预览' : 'AI 生成分镜草案') : (preview ? '规划导入预览' : '导入外部规划')
+  const stop = () => magpie?.cancel(setError)
+  return <Modal title={title} onClose={busy && magpie && !preview ? stop : close}>
     <div className="creative-dialog">
       <div className="import-target">
-        <span>{episode ? `目标集数 · ${episode.title}` : '从规划创建集数'}</span>
+        <span>{episode ? `目标集数 · ${episode.title}` : magpie ? '从草案创建集数' : '从规划创建集数'}</span>
         {fictional && <Badge value="示例 / 虚构" />}
       </div>
       {preview ? <>
@@ -138,14 +203,14 @@ export function PlanImportDialog({ episode, fictional, busy, onPreview, onMerge,
             </div>
             <div className="diff-values">
               <div><strong>当前</strong><pre>{change.before || '（空）'}</pre></div>
-              <div><strong>导入</strong><pre>{change.after || '（空）'}</pre></div>
+              <div><strong>{magpie ? '草案' : '导入'}</strong><pre>{change.after || '（空）'}</pre></div>
             </div>
             {change.conflict && <label className="diff-choice">处理方式
               <select aria-label={`${change.group} · ${change.field}处理方式`} disabled={busy}
                 value={replacements.includes(change.id) ? 'update' : 'keep'} onChange={event => {
                   setReplacements(event.target.value === 'update' ? [...replacements, change.id] : replacements.filter(id => id !== change.id))
                 }}>
-                <option value="keep">保留当前</option><option value="update">使用导入内容</option>
+                <option value="keep">保留当前</option><option value="update">{magpie ? '使用草案内容' : '使用导入内容'}</option>
               </select>
             </label>}
           </article>)}
@@ -159,15 +224,35 @@ export function PlanImportDialog({ episode, fictional, busy, onPreview, onMerge,
         </div>
       </> : <form onSubmit={event => {
         event.preventDefault()
+        if (busy) return
         setError('')
-        onPreview(text, setPreview, setError)
+        setStopped(false)
+        if (source.kind === 'paste') source.preview(text, setPreview, setError)
+        else {
+          const validModel = magpieModelSchema.safeParse(model)
+          const validScript = magpieScriptSchema.safeParse(text)
+          if (!validModel.success) { setError(validModel.error.issues[0].message); return }
+          if (!validScript.success) { setError(validScript.error.issues[0].message); return }
+          source.preview(validModel.data, validScript.data, draft => {
+            if (draft) setPreview(draft)
+            else setStopped(true)
+          }, setError)
+        }
       }}>
-        <label className="field">规划 JSON<textarea className="long-prompt" autoFocus rows={12} value={text} maxLength={maxPlanCharacters}
+        {magpie && <div className="magpie-settings">
+          <label className="field">Magpie 模型 ID<input value={model} maxLength={200} disabled={busy} spellCheck={false}
+            onChange={event => setModel(event.target.value)} /></label>
+          <p>本机网关 <code>{magpieBaseUrl}</code>。Magpie 可能按当前路由将剧本和相关简报、分镜信息转发给上游模型。</p>
+        </div>}
+        <label className="field">{magpie ? '剧本文本' : '规划 JSON'}<textarea className="long-prompt" autoFocus rows={magpie ? 8 : 12} value={text}
+          readOnly={busy && !!magpie} maxLength={magpie ? 30_000 : maxPlanCharacters}
           onChange={event => setText(event.target.value)} /></label>
         {error && <p className="inline-error" role="alert">{error}</p>}
         <div className="dialog-actions">
-          <button type="button" disabled={busy} onClick={close}>取消</button>
-          <button className="primary" disabled={busy || !text.trim()}>预览差异</button>
+          {magpie && <span className="dialog-status" role="status">{busy ? '正在等待 Magpie 返回草案…' : stopped ? '已停止等待' : ''}</span>}
+          {magpie && busy ? <button type="button" onClick={stop}>停止等待</button> :
+            <button type="button" disabled={busy} onClick={close}>取消</button>}
+          <button className="primary" disabled={busy || !text.trim()}>{magpie ? '生成草案' : '预览差异'}</button>
         </div>
       </form>}
     </div>

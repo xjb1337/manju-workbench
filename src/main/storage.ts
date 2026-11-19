@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import { copyFile, lstat, mkdir, open, readFile, realpath, rename, rm, rmdir } from 'node:fs/promises'
 import path from 'node:path'
+import { lock } from 'proper-lockfile'
 import {
-  emptyTrack, extensions, folderNameSchema, idSchema, mediaTargetSchema, mutationSchema, projectSchema,
+  emptyTrack, extensions, folderNameSchema, idSchema, mediaTargetSchema, mutationSchema, projectSchema, projectSchemaVersion,
   versionSchema, type Episode, type MediaKind, type MediaTarget, type Mutation, type Project, type Shot, type Version,
 } from '../shared/model'
 import { frameSpec, shotMethod, type Ratio } from '../shared/creative'
@@ -20,7 +21,7 @@ const directoryName = 'media'
 const maxProjectBytes = 32 * 1024 * 1024
 const maxMediaBytes = 4 * 1024 ** 3
 
-export async function atomicJson(file: string, value: unknown) {
+export async function atomicJson(file: string, value: unknown, beforePublish?: () => Promise<void>) {
   const temp = path.join(path.dirname(file), `.${randomUUID()}.tmp`)
   const json = JSON.stringify(value, null, 2) + '\n'
   if (Buffer.byteLength(json) > maxProjectBytes) throw new Error('项目文件超过 32 MiB')
@@ -32,6 +33,7 @@ export async function atomicJson(file: string, value: unknown) {
     } finally {
       await handle.close()
     }
+    await beforePublish?.()
     await rename(temp, file)
     // POSIX directory sync also persists the renamed entry when available.
     if (process.platform !== 'win32') {
@@ -44,6 +46,7 @@ export async function atomicJson(file: string, value: unknown) {
   } finally {
     await rm(temp, { force: true }).catch(() => {})
   }
+  return json
 }
 
 async function checkedDirectory(file: string) {
@@ -55,6 +58,12 @@ export async function checkedFile(file: string) {
   const stats = await lstat(file)
   if (!stats.isFile()) throw new Error('文件无效')
   return stats
+}
+
+async function readProjectFile(file: string) {
+  const stats = await checkedFile(file)
+  if (stats.size > maxProjectBytes) throw new Error('项目文件超过 32 MiB')
+  return readFile(file, 'utf8')
 }
 
 export function findEpisode(project: Project, id: string) {
@@ -195,36 +204,35 @@ export class ProjectStore {
   private tail: Promise<unknown> = Promise.resolve()
   private pendingPlan?: { token: string; base: Project; staged: ReturnType<typeof stagePlan> }
 
-  private constructor(readonly root: string, private document: Project) {}
+  private constructor(readonly root: string, private document: Project, private savedJson: string) {}
 
   static async create(parent: string, titleInput: string, fictional = false) {
     const title = folderNameSchema.parse(titleInput)
     const root = path.join(await realpath(parent), title)
     await mkdir(root)
     const document = projectSchema.parse({
-      schemaVersion: 1, id: randomUUID(), title, fictional, script: '', episodes: [], characters: [], scenes: [],
+      schemaVersion: projectSchemaVersion, id: randomUUID(), title, fictional, script: '', episodes: [], characters: [], scenes: [],
     })
     let mediaCreated = false
     try {
       await mkdir(path.join(root, directoryName))
       mediaCreated = true
-      await atomicJson(path.join(root, projectFilename), document)
+      const json = await atomicJson(path.join(root, projectFilename), document)
+      return new ProjectStore(root, document, json)
     } catch (error) {
       if (mediaCreated) await rmdir(path.join(root, directoryName)).catch(() => {})
       await rmdir(root).catch(() => {})
       throw error
     }
-    return new ProjectStore(root, document)
   }
 
   static async open(folder: string) {
     const root = await realpath(folder)
     const file = path.join(root, projectFilename)
-    const stat = await checkedFile(file)
-    if (stat.size > maxProjectBytes) throw new Error('项目文件超过 32 MiB')
-    const document = projectSchema.parse(JSON.parse(await readFile(file, 'utf8')))
+    const json = await readProjectFile(file)
+    const document = projectSchema.parse(JSON.parse(json))
     await checkedDirectory(path.join(root, directoryName))
-    return new ProjectStore(root, document)
+    return new ProjectStore(root, document, json)
   }
 
   get snapshot() {
@@ -246,10 +254,27 @@ export class ProjectStore {
       const before = previous.get(episode.id)
       if (before && (ratioChanged || exportInputsChanged(before, episode, this.document, next))) episode.exportRecord.stale = true
     }
-    const valid = projectSchema.parse(next)
-    await atomicJson(path.join(this.root, projectFilename), valid)
-    this.document = valid
-    return this.snapshot
+    const valid = projectSchema.parse({ ...next, schemaVersion: projectSchemaVersion })
+    const file = path.join(this.root, projectFilename)
+    let compromised = false
+    const release = await lock(file, {
+      realpath: false, retries: { retries: 3, minTimeout: 50 },
+      onCompromised: () => { compromised = true },
+    }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ELOCKED') throw new Error('其他窗口正在保存此作品，请稍后重试')
+      throw error
+    })
+    try {
+      this.savedJson = await atomicJson(file, valid, async () => {
+        if (await readProjectFile(file) !== this.savedJson || compromised) {
+          throw new Error('磁盘上的作品已变更，请保留草稿并重新打开作品后再保存')
+        }
+      })
+      this.document = valid
+      return this.snapshot
+    } finally {
+      await release().catch(error => console.error('project:release-lock', error))
+    }
   }
 
   edit(input: unknown) {
@@ -261,11 +286,11 @@ export class ProjectStore {
     })
   }
 
-  previewPlan(episodeInput: unknown, input: unknown): Promise<PlanPreview> {
+  previewPlan(episodeInput: unknown, input: unknown, source: 'import' | 'magpie' = 'import'): Promise<PlanPreview> {
     const episodeId = idSchema.nullable().parse(episodeInput)
     return this.queue(async () => {
       this.pendingPlan = undefined
-      const staged = stagePlan(this.snapshot, episodeId, input)
+      const staged = stagePlan(this.snapshot, episodeId, input, source)
       const token = randomUUID()
       this.pendingPlan = { token, base: this.document, staged }
       return { token, changes: staged.changes }
@@ -350,7 +375,7 @@ export class ProjectStore {
         archived = true
         const version = versionSchema.parse({
           id, name: path.basename(source), extension, createdAt: new Date().toISOString(), seconds,
-          ...(kind === 'video' && audio && { hasAudio: true }),
+          ...(kind === 'video' && { hasAudio: !!audio }),
         })
         track.versions.push(version)
         track.activeId = id

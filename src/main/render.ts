@@ -1,6 +1,6 @@
 import { lstat, mkdtemp, open, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { shotMedia, folderNameSchema, totalFrames, type Episode, type Shot } from '../shared/model'
+import { shotMedia, shotVisual, folderNameSchema, totalFrames, type Episode, type Shot } from '../shared/model'
 import { frameSpec, shotMethod, usesFinishedVideo, type FrameSpec } from '../shared/creative'
 import type { Project } from '../shared/model'
 import { mediaInput, probe, runTool } from './process'
@@ -17,16 +17,34 @@ export function subtitleText(value: string) {
 }
 
 function assTime(frames: number) {
-  const centiseconds = Math.ceil(frames * 100 / fps)
+  const centiseconds = Math.floor(frames * 100 / fps)
   const pad = (value: number) => String(value).padStart(2, '0')
   return `${Math.floor(centiseconds / 360_000)}:${pad(Math.floor(centiseconds / 6000) % 60)}:${pad(Math.floor(centiseconds / 100) % 60)}.${pad(centiseconds % 100)}`
 }
 
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
 export function subtitles(shot: Shot, { width, height, subtitle }: FrameSpec) {
+  const maxColumns = Math.floor((width - subtitle.horizontal * 2) / (subtitle.size * 1.15))
+  const lines = subtitleText(shot.dialogue).split('\\N').flatMap(line => {
+    const letters = Array.from(graphemes.segment(line), item => item.segment)
+    const wrapped = []
+    for (let i = 0; i < letters.length; i += maxColumns) wrapped.push(letters.slice(i, i + maxColumns).join(''))
+    return wrapped.length ? wrapped : ['']
+  })
+  const linesPerPage = 4
+  const pages = Math.ceil(lines.length / linesPerPage)
+  if (pages > shot.frames) throw new Error('镜头时长不足以显示全部字幕，请缩短台词或延长镜头')
+  const events = Array.from({ length: pages }, (_, index) => {
+    const start = Math.floor(index * shot.frames / pages)
+    const end = Math.floor((index + 1) * shot.frames / pages)
+    const text = lines.slice(index * linesPerPage, (index + 1) * linesPerPage).join('\\N')
+    return `Dialogue: 0,${assTime(start)},${assTime(end)},Chinese,,0,0,0,,${text}`
+  }).join('\n')
   const font = process.platform === 'win32' ? 'Microsoft YaHei' : 'Noto Sans CJK SC'
   return `[Script Info]
 ScriptType: v4.00+
-WrapStyle: 0
+WrapStyle: 2
 PlayResX: ${width}
 PlayResY: ${height}
 
@@ -36,7 +54,7 @@ Style: Chinese,${font},${subtitle.size},&H00FFFFFF,&H00FFFFFF,&H00141020,&H00141
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-Dialogue: 0,0:00:00.00,${assTime(shot.frames)},Chinese,,0,0,0,,${subtitleText(shot.dialogue)}
+${events}
 `
 }
 
@@ -47,15 +65,15 @@ function seconds(frames: number) {
 async function encodeShot(store: ProjectStore, shot: Shot, file: string, cwd: string, project: Project, spec: FrameSpec, signal: AbortSignal) {
   const { width, height } = spec
   const method = shotMethod(project, shot)
-  const video = shotMedia(shot, 'video', method)
-  const visual = video ?? shotMedia(shot, 'image', method)
+  const visual = shotVisual(shot, method)
+  const video = visual?.kind === 'video' ? visual.version : undefined
   const voice = shotMedia(shot, 'audio', method)
-  const visualPath = visual && await store.assetPath(visual)
-  const visualArgs = visual && visualPath ? mediaInput(visualPath, visual.extension)
+  const visualPath = visual && await store.assetPath(visual.version)
+  const visualArgs = visual && visualPath ? mediaInput(visualPath, visual.version.extension)
     : ['-f', 'lavfi', '-i', `color=c=black:s=${width}x${height}:r=${fps}`]
   // Probe earlier manifests that predate the embedded-audio marker.
   const embeddedAudio = !voice && !shot.omittedMedia?.audio && video && visualPath && usesFinishedVideo(method)
-    && (video.hasAudio || (await probe(visualPath, video.extension, signal)).streams.some(stream => stream.codec_type === 'audio'))
+    && (video.hasAudio ?? (await probe(visualPath, video.extension, signal)).streams.some(stream => stream.codec_type === 'audio'))
   const audioArgs = embeddedAudio ? [] : voice ? mediaInput(await store.assetPath(voice), voice.extension)
     : ['-f', 'lavfi', '-i', `anullsrc=r=${sampleRate}:cl=mono`]
   const caption = subtitleText(shot.dialogue)

@@ -45,7 +45,7 @@ export async function fillSample(store: ProjectStore, assets: string) {
   try {
     await store.edit({ type: 'project.brief', workType: 'story', brief: {
       theme: '一封旧信与雾港灯塔', audience: '短篇故事观众', targetSeconds: 30, ratio: '16:9',
-      style: '紫蓝与暖光的手绘动画', language: '简体中文', tools: 'ChatGPT、Google Flow',
+      style: '紫蓝与暖光的手绘动画', language: '简体中文',
     } })
     await store.edit({ type: 'project.edit', title: store.snapshot.title, script: '雾港值守人收到一封旧信，沿码头走向灯塔。' })
     let project = await store.edit({ type: 'episode.add', title: '第 1 集 · 雾港来信' })

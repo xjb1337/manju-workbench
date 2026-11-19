@@ -1,15 +1,34 @@
 import { randomUUID } from 'node:crypto'
+import { z } from 'zod'
 import { detailKindSchema, detailLabels, methodLabels, shotMethod } from '../shared/creative'
 import { emptyTrack, type Episode, type Project, type Shot } from '../shared/model'
-import { externalPlanSchema, maxPlanCharacters, type PlanChange } from '../shared/plan'
+import { externalMethod, externalPlanSchema, magpiePlanSchema, maxPlanCharacters, storedMethod, type ExternalPlan, type PlanChange } from '../shared/plan'
 import { legacyDetail } from '../shared/prompts'
 
-export function parsePlan(input: unknown) {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function normalizeOldPlan(data: unknown) {
+  if (!isRecord(data) || !isRecord(data.episode) || !Array.isArray(data.episode.shots)) return
+  for (const shot of data.episode.shots) {
+    if (!isRecord(shot)) continue
+    if (shot.method === 'flow' || shot.method === 'flow-only') shot.method = externalMethod(shot.method)
+    const details = shot.details
+    if (isRecord(details) && Object.hasOwn(details, 'flow') && !Object.hasOwn(details, 'video')) {
+      details.video = details.flow
+      delete details.flow
+    }
+  }
+}
+
+function parsePlanningJson<T>(input: unknown, schema: z.ZodType<T>) {
   if (typeof input !== 'string' || input.length > maxPlanCharacters) throw new Error('规划 JSON 最多 1,000,000 个字符')
   let data: unknown
   try { data = JSON.parse(input.replace(/^\uFEFF/, '')) }
   catch { throw new Error('规划 JSON 无法解析，请粘贴完整的 JSON 对象') }
-  const parsed = externalPlanSchema.safeParse(data)
+  normalizeOldPlan(data)
+  const parsed = schema.safeParse(data)
   if (!parsed.success) {
     const issue = parsed.error.issues[0]
     const at = issue.path.join('.') || '根对象'
@@ -28,8 +47,11 @@ export function parsePlan(input: unknown) {
   return parsed.data
 }
 
-export function stagePlan(next: Project, episodeId: string | null, input: unknown) {
-  const plan = parsePlan(input)
+export const parsePlan = (input: unknown) => parsePlanningJson(input, externalPlanSchema)
+export const parseMagpieDraft = (input: unknown) => parsePlanningJson(input, magpiePlanSchema)
+
+export function stagePlan(next: Project, episodeId: string | null, input: unknown, source: 'import' | 'magpie') {
+  const plan: Partial<ExternalPlan> & Pick<ExternalPlan, 'episode'> = source === 'magpie' ? parseMagpieDraft(input) : parsePlan(input)
   const changes: PlanChange[] = []
   const writes: (() => void)[] = []
   function add(group: string, field: string, before: string | undefined, after: string, write: () => void, occupied = !!before?.trim()) {
@@ -73,9 +95,10 @@ export function stagePlan(next: Project, episodeId: string | null, input: unknow
     incoming.shots.forEach((entry, position) => {
       const previous = entry.shotId ? original.get(entry.shotId) : undefined
       if (entry.shotId && !previous) throw new Error(`规划格式错误 · episode.shots.${position}.shotId · 所选集数中没有此镜头`)
+      const method = entry.method && storedMethod(entry.method)
       const shot: Shot = previous?.shot ?? {
         id: randomUUID(), title: entry.title!, frames: entry.frames!, dialogue: '', prompt: '', status: '待制作',
-        method: entry.method ?? shotMethod(next), media: { image: emptyTrack(), video: emptyTrack(), audio: emptyTrack() },
+        method: method ?? shotMethod(next), media: { image: emptyTrack(), video: emptyTrack(), audio: emptyTrack() },
       }
       const row = (previous?.index ?? target.shots.length + added) + 1
       const label = `镜头 ${row}｜${shot.title}`
@@ -88,11 +111,11 @@ export function stagePlan(next: Project, episodeId: string | null, input: unknow
       } else {
         if (entry.title !== undefined) add(label, '标题', shot.title, entry.title, () => { shot.title = entry.title! })
         if (entry.frames !== undefined) add(label, '时长', duration(shot.frames), duration(entry.frames), () => { shot.frames = entry.frames! })
-        if (entry.method !== undefined) add(label, '制作方式', methodLabels[shotMethod(next, shot)], methodLabels[entry.method], () => { shot.method = entry.method })
+        if (method !== undefined) add(label, '制作方式', methodLabels[shotMethod(next, shot)], methodLabels[method], () => { shot.method = method })
       }
       if (entry.dialogue !== undefined) add(label, '台词', shot.dialogue, entry.dialogue, () => { shot.dialogue = entry.dialogue! })
       for (const kind of detailKindSchema.options) {
-        const body = entry.details?.[kind]
+        const body = entry.details?.[kind === 'flow' ? 'video' : kind]
         if (body === undefined) continue
         const existing = shot.details?.[kind]
         add(label, detailLabels[kind], existing?.body ?? legacyDetail(shot, kind), body,

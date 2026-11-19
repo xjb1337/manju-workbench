@@ -3,14 +3,18 @@ import type { RenderProgress, UpdateProgress, Workbench } from '../shared/api'
 
 const bridge: Workbench = {
   open: () => ipcRenderer.invoke('project:open'),
+  recentProjects: () => ipcRenderer.invoke('project:recent'),
+  openRecent: id => ipcRenderer.invoke('project:open-recent', id),
   create: (title, sample) => ipcRenderer.invoke('project:create', title, sample),
   close: () => ipcRenderer.invoke('project:close'),
   edit: (key, change) => ipcRenderer.invoke('project:edit', key, change),
   previewPlan: (key, episodeId, text) => ipcRenderer.invoke('plan:preview', key, episodeId, text),
+  generateMagpiePlan: (key, episodeId, model, script) => ipcRenderer.invoke('plan:generate-magpie', key, episodeId, model, script),
+  cancelPlanGeneration: key => ipcRenderer.invoke('plan:cancel-generation', key),
   mergePlan: (key, token, replacements) => ipcRenderer.invoke('plan:merge', key, token, replacements),
   importMedia: (key, target) => ipcRenderer.invoke('project:import', key, target),
   copy: text => ipcRenderer.invoke('app:copy', text),
-  openTool: tool => ipcRenderer.invoke('app:open-tool', tool),
+  openTool: (key, tool) => ipcRenderer.invoke('app:open-tool', key, tool),
   render: (key, episodeId, mode) => ipcRenderer.invoke('episode:render', key, episodeId, mode),
   cancelRender: () => ipcRenderer.invoke('episode:cancel'),
   onProgress: listener => {
