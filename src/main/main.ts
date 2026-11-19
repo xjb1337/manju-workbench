@@ -19,7 +19,7 @@ import { WorkbenchSession } from './session'
 import { findEpisode, findShot, ProjectStore } from './storage'
 import { cleanupStaleTempDirs, staleTempAgeMs, staleTempPrefixes } from './temp-cleanup'
 import { createProductionUpdater } from './update-system'
-import { InvalidUpdatePackageError, type Updater } from './updater'
+import { InvalidUpdatePackageError, ManualUpdateRequiredError, type Updater } from './updater'
 import { resolveInitialBounds, themeBackground } from './window-state'
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'manju-media', privileges: { standard: true, secure: true, stream: true } }])
@@ -93,6 +93,7 @@ function handle<T>(channel: string, fn: (win: BrowserWindow, ...args: unknown[])
     } catch (error) {
       if (error instanceof UpgradeCanceled) return { ok: false, error: '已取消升级', code: 'upgrade-canceled' }
       console.error(channel, error)
+      if (error instanceof ManualUpdateRequiredError) return { ok: false, error: error.message, code: 'update-manual-required' }
       if (error instanceof InvalidUpdatePackageError) return { ok: false, error: error.message, code: 'update-package-invalid' }
       return { ok: false, error: diagnose(error) }
     }
@@ -112,6 +113,10 @@ function wire() {
     if (!win.isDestroyed()) win.webContents.send('update:progress', value)
   }))
   handle('update:cancel', () => updater.cancel())
+  handle('update:open-releases', async () => {
+    await shell.openExternal('https://github.com/xjb1337/manju-workbench/releases')
+    return null
+  })
   handle('update:open-folder', async () => {
     await updater.openPortable(async directory => {
       if (await shell.openPath(directory)) throw new Error('无法打开更新包所在目录')
@@ -122,10 +127,10 @@ function wire() {
     if (workbench.editorDirty) throw new Error('请先保存修改，再安装更新')
     workbench.confirmingInstall = true
     try {
-      const started = await updater.install(async () => {
+      const started = await updater.install(async directory => {
         const response = await dialog.showMessageBox(win, {
           type: 'warning', title: '安装更新', message: '关闭工作台并启动安装程序？',
-          detail: '应用未签名。SHA-256 仅验证文件完整性，无法证明发布者身份。',
+          detail: `目标目录\n${directory}\n\n应用未签名。SHA-256 仅验证文件完整性，无法证明发布者身份。`,
           buttons: ['取消', '关闭并安装'], defaultId: 0, cancelId: 0, noLink: true,
         })
         if (workbench.editorDirty) throw new Error('请先保存修改，再安装更新')

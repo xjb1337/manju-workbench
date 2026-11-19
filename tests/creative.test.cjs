@@ -605,11 +605,15 @@ test('横竖屏 SRT 和烧录 ASS 使用相同的帧分段及多行字幕，保�
       return [toFrame(parse(start)), toFrame(parse(end)), line.split(',,0,0,0,,')[1].split('\\N')]
     }), cues.map(({ start, end, lines }) => [start, end, lines]))
     const srt = episodeSrt({ shots: [silent, shot, tail] }, spec)
-    assert.match(srt, /观测 &lt;i&gt;&amp; ｛标记｝＼N\n\u00a0\n第二行/)
+    assert.match(srt, /观测 ＜i＞＆ ｛标记｝＼N\n\u00a0\n第二行/)
+    const decoded = require('node:child_process').execFileSync('ffmpeg', [
+      '-nostdin', '-v', 'error', '-f', 'srt', '-i', 'pipe:0', '-c:s', 'ass', '-f', 'ass', 'pipe:1',
+    ], { input: srt, encoding: 'utf8' })
+    assert.ok(decoded.includes('观测 ＜i＞＆ ｛标记｝＼N\\N\u00a0\\N第二行'))
     const srtCues = srt.trimEnd().split('\n\n').map(block => {
       const [index, time, ...lines] = block.split('\n')
       return [+index, ...time.split(' --> ').map(stamp => toFrame(parse(stamp))), lines.map(line =>
-        line.replace(/^\u00a0$/, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'))]
+        line.replace(/^\u00a0$/, ''))]
     })
     assert.deepEqual(srtCues, [
       ...cues.map(({ start, end, lines }, i) => [i + 1, start + 7, end + 7, lines]),

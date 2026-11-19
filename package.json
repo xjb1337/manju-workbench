@@ -14,7 +14,8 @@
     "verify:desktop": "node tests/desktop.cjs",
     "pack:win": "npm run build && electron-builder --win nsis --x64",
     "compile:main": "tsc -p tsconfig.main.json",
-    "pack:win:native": "node scripts/pack-native.cjs"
+    "pack:win:native": "node scripts/pack-native.cjs",
+    "verify:update": "npm run compile:main && node scripts/check-windows-update.cjs && node --test tests/update.test.cjs"
   },
   "build": {
     "appId": "local.manju.workbench",

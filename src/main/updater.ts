@@ -6,16 +6,24 @@ import type { UpdateCheck, UpdateDownload, UpdateKind, UpdateProgress } from '..
 import { downloadResponse, findRelease, hasPackage, packageFor, responseBytes } from './update-release'
 import type { PackageAsset, Release, UpdateRequest } from './update-release'
 
+export type SetupUpdateTarget = { kind: 'setup'; directory: string; identity: string }
+export type UpdateTarget = SetupUpdateTarget | { kind: 'portable' } | { kind: 'manual' } | { kind: null }
+
 export type UpdateOptions = {
   version: string
-  kind: () => Promise<UpdateKind | null>
+  target: () => Promise<UpdateTarget>
   temp: string
   request: UpdateRequest
-  launch: (file: string) => Promise<void>
+  launch: (file: string, target: SetupUpdateTarget) => Promise<void>
 }
+type Offer = { release: Release; target: Extract<UpdateTarget, { kind: UpdateKind }> }
 type Downloaded = { asset: PackageAsset; directory: string; file: string }
 
 export class InvalidUpdatePackageError extends Error {}
+export const manualUpdateReason = '安装来源与当前目录无法匹配，请手动更新。'
+export class ManualUpdateRequiredError extends Error {
+  constructor() { super(manualUpdateReason) }
+}
 
 async function isPe(file: FileHandle, size: number) {
   const dos = Buffer.alloc(64)
@@ -80,7 +88,7 @@ export class Updater {
   #transfer?: AbortController
   #downloadTask?: Promise<UpdateDownload>
   #usingReady = false
-  #offer?: { release: Release; kind: UpdateKind }
+  #offer?: Offer
   #ready?: Downloaded
   #launched = false
 
@@ -109,14 +117,18 @@ export class Updater {
       const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)])
       const result = await findRelease(request, currentVersion, signal)
       if (result.status !== 'available') return { currentVersion, ...result }
-      const kind = await this.#options.kind()
+      const target = await this.#options.target()
+      const kind = target.kind === 'manual' ? null : target.kind
       const { release } = result
-      const unavailable = !kind ? '此运行环境不支持 Windows x64 更新包'
+      const unavailable = target.kind === 'manual' ? manualUpdateReason : !kind ? '此运行环境不支持 Windows x64 更新包'
         : !release.manifest ? '此版本缺少更新清单'
         : !hasPackage(release, kind) ? (kind === 'setup' ? '此版本缺少安装包' : '此版本缺少便携包')
         : undefined
-      if (kind && !unavailable) this.#offer = { release, kind }
-      return { status: 'available', currentVersion, version: release.version, notes: release.notes, kind, unavailable }
+      if ((target.kind === 'setup' || target.kind === 'portable') && !unavailable) this.#offer = { release, target }
+      return { status: 'available', currentVersion, version: release.version, notes: release.notes, kind, unavailable,
+        ...(target.kind === 'manual' && { manual: true as const }),
+        ...(target.kind === 'setup' && { directory: target.directory }),
+      }
     } finally {
       this.#checking = undefined
     }
@@ -135,12 +147,12 @@ export class Updater {
     return task
   }
 
-  async #download(offer: { release: Release; kind: UpdateKind }, controller: AbortController,
+  async #download(offer: Offer, controller: AbortController,
     progress: (value: UpdateProgress) => void): Promise<UpdateDownload> {
     const { request, temp } = this.#options
     let directory: string | undefined
     try {
-      const asset = await packageFor(request, offer.release, offer.kind,
+      const asset = await packageFor(request, offer.release, offer.target.kind,
         AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]))
       const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(60 * 60_000)])
       signal.throwIfAborted()
@@ -186,14 +198,15 @@ export class Updater {
     return true
   }
 
-  async install(approve: () => Promise<boolean>) {
+  async install(approve: (directory: string) => Promise<boolean>) {
     this.#requireIdle()
     const ready = this.#ready
-    if (ready?.asset.kind !== 'setup') throw new InvalidUpdatePackageError('没有已校验的安装包，请重新下载')
+    const expected = this.#offer?.target
+    if (ready?.asset.kind !== 'setup' || expected?.kind !== 'setup') throw new InvalidUpdatePackageError('没有已校验的安装包，请重新下载')
     this.#usingReady = true
     try {
-      if (await this.#options.kind() !== 'setup') throw new Error('当前运行方式不支持启动安装程序')
-      if (!await approve()) return false
+      await this.#assertSetupTarget(expected)
+      if (!await approve(expected.directory)) return false
       try {
         if (!path.isAbsolute(ready.file) || path.basename(ready.file) !== ready.asset.name || !ready.file.endsWith('-Setup.exe')) {
           throw new Error('安装包路径或文件名无效')
@@ -206,11 +219,25 @@ export class Updater {
           : error instanceof Error ? error.message : '安装包校验失败'
         throw new InvalidUpdatePackageError(`${reason}，请重新下载`, { cause: error })
       }
-      await this.#options.launch(ready.file)
+      await this.#assertSetupTarget(expected)
+      await this.#options.launch(ready.file, expected)
       this.#launched = true
       return true
+    } catch (error) {
+      if (error instanceof ManualUpdateRequiredError) {
+        this.#offer = undefined
+        await this.#removeReady().catch(() => { this.#ready = undefined })
+      }
+      throw error
     } finally {
       this.#usingReady = false
+    }
+  }
+
+  async #assertSetupTarget(expected: SetupUpdateTarget) {
+    const target = await this.#options.target()
+    if (target.kind !== 'setup' || target.directory !== expected.directory || target.identity !== expected.identity) {
+      throw new ManualUpdateRequiredError()
     }
   }
 

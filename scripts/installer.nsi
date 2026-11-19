@@ -1,10 +1,13 @@
 Unicode true
 !include "MUI2.nsh"
 !include "x64.nsh"
+!include "FileFunc.nsh"
 
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\ManjuWorkbench"
 !define APP_FOLDER "$LOCALAPPDATA\Programs\Manju Workbench"
 !define APP_EXE "漫剧工作台.exe"
+!define INSTALL_IDENTITY "local.manju.workbench"
+Var UpdateTarget
 
 !ifndef APP_ICON
   !define APP_ICON "..\resources\icon.ico"
@@ -30,6 +33,7 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "Manju Workbench"
 !define MUI_FINISHPAGE_RUN_TEXT "立即运行 漫剧工作台"
 
 !insertmacro MUI_PAGE_WELCOME
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipUpdateDirectory
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_INSTFILES
@@ -39,17 +43,77 @@ VIAddVersionKey /LANG=2052 "LegalCopyright" "Manju Workbench"
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
 Function .onInit
+  SetRegView 32
   ${IfNot} ${RunningX64}
     MessageBox MB_ICONSTOP "此安装包需要 64 位 Windows。"
     Abort
   ${EndIf}
+  ${GetParameters} $0
+  ${GetOptions} $0 "/MANJUUPDATE=" $1
+  IfErrors manual
+  StrCmp $1 "${INSTALL_IDENTITY}" 0 invalid
+  ${GetOptions} $0 "/MANJUDIR=" $UpdateTarget
+  IfErrors invalid
+  StrCmp $UpdateTarget "" invalid
+  Call ConfirmUpdateTarget
+  Return
+manual:
+  ${GetOptions} $0 "/MANJUDIR=" $1
+  IfErrors done invalid
+invalid:
+  Call RejectUpdateTarget
+done:
+FunctionEnd
+
+Function SkipUpdateDirectory
+  StrCmp $UpdateTarget "" done
+  Abort
+done:
+FunctionEnd
+
+Function RejectUpdateTarget
+  MessageBox MB_ICONSTOP "安装来源与目标目录无法匹配，请手动更新。"
+  SetErrorLevel 2
+  Abort
+FunctionEnd
+
+Function ConfirmUpdateTarget
+  ReadRegStr $1 HKCU "${UNINSTALL_KEY}" "InstallLocation"
+  StrCmp $1 "$UpdateTarget" 0 invalid
+  ReadRegStr $1 HKCU "${UNINSTALL_KEY}" "InstallIdentity"
+  ; 1.4.0 registrations predate this value. Their registry key and file paths still identify Setup.
+  StrCmp $1 "" legacy
+  StrCmp $1 "${INSTALL_IDENTITY}" 0 invalid
+legacy:
+  ReadRegStr $1 HKCU "${UNINSTALL_KEY}" "DisplayIcon"
+  StrCmp $1 "$UpdateTarget\${APP_EXE}" 0 invalid
+  ReadRegStr $1 HKCU "${UNINSTALL_KEY}" "UninstallString"
+  StrCmp $1 '$\"$UpdateTarget\Uninstall.exe$\"' 0 invalid
+  IfFileExists "$UpdateTarget\${APP_EXE}" 0 invalid
+  IfFileExists "$UpdateTarget\Uninstall.exe" 0 invalid
+  ; Resolve directory aliases (including junctions) before allowing any writes.
+  System::Call 'kernel32::CreateFileW(w "$UpdateTarget", i 0, i 7, p 0, i 3, i 0x02000000, p 0) p .r4'
+  StrCmp $4 "-1" invalid
+  System::Call 'kernel32::GetFinalPathNameByHandleW(p r4, w .r5, i ${NSIS_MAX_STRLEN}, i 0) i .r6'
+  System::Call 'kernel32::CloseHandle(p r4)'
+  IntCmp $6 0 invalid
+  IntCmp $6 ${NSIS_MAX_STRLEN} invalid 0 invalid
+  StrCmp $5 "\\?\$UpdateTarget" 0 invalid
+  StrCpy $INSTDIR "$UpdateTarget"
+  Return
+invalid:
+  Call RejectUpdateTarget
 FunctionEnd
 
 Function un.onInit
+  SetRegView 32
 FunctionEnd
 
 Section "漫剧工作台（必需）" SecApp
   SectionIn RO
+  ${If} $UpdateTarget != ""
+    Call ConfirmUpdateTarget
+  ${EndIf}
   SetShellVarContext current
   SetOutPath "$INSTDIR"
   File /r "${APP_SOURCE}\*"
@@ -58,6 +122,7 @@ Section "漫剧工作台（必需）" SecApp
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${APP_VERSION}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\${APP_EXE}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallIdentity" "${INSTALL_IDENTITY}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'
   WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoRepair" 1

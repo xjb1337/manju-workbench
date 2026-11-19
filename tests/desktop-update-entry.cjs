@@ -11,10 +11,13 @@ if (!origin || new URL(origin).hostname !== '127.0.0.1' || !path.isAbsolute(temp
 
 app.setAppPath(path.resolve(__dirname, '..'))
 globalThis.updateLaunches = []
+globalThis.updateTarget = {
+  kind: 'setup', directory: 'D:\\工具 与 漫剧\\安装 目录', identity: 'local.manju.workbench',
+}
 require('../dist/main/update-system').createProductionUpdater = () => new Updater({
   version: require('../package.json').version,
   temp,
-  kind: async () => 'setup',
+  target: async () => globalThis.updateTarget,
   request: (url, init) => loopbackRequest(origin, url, init),
   launch: async file => {
     globalThis.updateLaunches.push(file)

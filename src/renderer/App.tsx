@@ -564,7 +564,7 @@ export function App() {
           onRemove={() => remove('删除镜头', shot.title, { type: 'shot.remove', episodeId: episode.id, shotId: shot.id })} />}
       </div>
       <footer><span><FolderOpen size={14} /> <span className="project-path" title={opened.directory}>{opened.directory}</span></span>
-        <span>{project.schemaVersion === 1 && <Badge value="格式 1" />} {busy ? '处理中' : dirty ? '有未保存修改' : '已保存'}</span></footer>
+        <span>{project.schemaVersion === 1 && <Badge value="格式 1" />}<span>{busy ? '处理中' : dirty ? '有未保存修改' : '已保存'}</span></span></footer>
     </>}
 
     {opened && project && creativeDialog === 'plan' && <PlanningDialog project={project} episode={episode} busy={busy}

@@ -9,7 +9,7 @@ export interface OpenProject {
   directory: string
 }
 
-export type Reply<T> = { ok: true; value: T } | { ok: false; error: string; code?: 'update-package-invalid' | 'upgrade-canceled' }
+export type Reply<T> = { ok: true; value: T } | { ok: false; error: string; code?: 'update-package-invalid' | 'update-manual-required' | 'upgrade-canceled' }
 export type RecentProject = { id: string; title: string; directory: string; fictional: boolean }
 export type Tool = GenerationKind | 'planning'
 export type RenderProgress = { mode: 'preview' | 'export'; percent: number }
@@ -22,7 +22,7 @@ export type UpdateKind = 'setup' | 'portable'
 export type UpdateCheck = { currentVersion: string } & (
   | { status: 'none' }
   | { status: 'latest'; version: string; notes: string }
-  | { status: 'available'; version: string; notes: string; kind: UpdateKind | null; unavailable?: string }
+  | { status: 'available'; version: string; notes: string; kind: UpdateKind | null; unavailable?: string; manual?: true; directory?: string }
 )
 export type UpdateProgress = { received: number; total: number }
 export type UpdateDownload = { status: 'canceled' } | { status: 'ready'; fileName: string }
@@ -64,6 +64,7 @@ export interface Workbench {
   downloadUpdate(): Promise<Reply<UpdateDownload>>
   cancelUpdate(): Promise<Reply<boolean>>
   installUpdate(): Promise<Reply<'started' | 'canceled'>>
+  openUpdateReleasePage(): Promise<Reply<null>>
   openUpdateFolder(): Promise<Reply<null>>
   onUpdateProgress(listener: (event: UpdateProgress) => void): () => void
   setEditorDirty(dirty: boolean): Promise<Reply<null>>

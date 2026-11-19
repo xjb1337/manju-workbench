@@ -290,6 +290,7 @@ async function verifyUpdates(folder, project) {
       globalThis.updateConfirmations = 0
       dialog.showMessageBox = async (_window, options) => {
         if (options.title !== '安装更新' || options.defaultId !== 0 || options.cancelId !== 0) throw new Error('Unexpected confirmation')
+        if (!options.detail.includes(globalThis.updateTarget.directory)) throw new Error('Missing target directory')
         globalThis.updateConfirmations++
         return { response: 0 }
       }
@@ -364,6 +365,8 @@ async function verifyUpdates(folder, project) {
     assert.equal(await script.inputValue(), '虚构验收 · 尚未保存')
     await script.fill(before)
     await footerSaved(page)
+
+
     await guide(page).waitFor()
     const [packageDirectory] = await readdir(temp)
     await rename(path.join(temp, packageDirectory, fixture.fileName), path.join(folder, '移走的测试更新包.exe'))
@@ -375,6 +378,15 @@ async function verifyUpdates(folder, project) {
     await button(panel, '下载').click()
     await panel.getByText('已通过完整性校验', { exact: false }).waitFor()
     assert.deepEqual(await app.evaluate(() => globalThis.updateLaunches), [])
+    await app.evaluate(() => { globalThis.updateTarget = { kind: 'manual' } })
+    await button(panel, '安装').click()
+    await panel.getByRole('alert').getByText('安装来源与当前目录无法匹配，请手动更新。', { exact: true }).waitFor()
+    assert.equal(await button(panel, '安装').count(), 0)
+    assert.equal(await app.evaluate(() => globalThis.updateConfirmations), 1)
+    assert.deepEqual(await app.evaluate(() => globalThis.updateLaunches), [])
+    await screenshot(page, 'feature-update-manual-fallback.png')
+    await button(panel, '打开发布页').click()
+    assert.deepEqual(await app.evaluate(() => globalThis.openedUrls), ['https://github.com/xjb1337/manju-workbench/releases'])
     console.log('更新夹具验收通过：无后台检查，暂无发布，发现新版本，纯文本说明，下载取消及校验，安装确认取消，未保存修改保护')
   } catch (error) {
     await desktop?.page.screenshot({ path: path.join(folder, 'diagnostic-update-failure.png'), timeout: 3000 }).catch(() => {})
@@ -772,7 +784,7 @@ async function verifyLegacyUpgrade(folder) {
   const { app, page } = await launch(path.join(folder, '格式升级 Electron Profile'))
   try {
     await choose(app, fixture.root)
-    await button(page, '打开作品').click()
+    await button(page.getByRole('banner'), '打开作品').click()
     await page.locator('footer').getByText('格式 1', { exact: true }).waitFor()
     await button(directory(page), '制作简报').click()
     await page.getByLabel('主题').fill('虚构升级验收')
@@ -782,8 +794,9 @@ async function verifyLegacyUpgrade(folder) {
     await screenshot(page, 'feature-format-1-upgrade-confirmation.png')
     await button(dialog, '取消').click()
     await dialog.waitFor({ state: 'hidden' })
-    await page.locator('footer').getByText('有未保存修改', { exact: true }).waitFor()
+    await page.locator('footer').getByText(/有未保存修改/).waitFor()
     assert.equal(await page.getByRole('dialog').count(), 0)
+    assert.equal(await page.getByLabel('主题').inputValue(), '虚构升级验收')
     assert.deepEqual(await readdir(parent), [path.basename(fixture.root)])
     assert.deepEqual(await readFile(fixture.file), fixture.bytes)
     await button(page, '总规划提示词').click()
@@ -823,7 +836,7 @@ async function verifyLegacyUpgrade(folder) {
     await choose(app, srt, 'saveChoices')
     await button(stage(page), '导出 SRT').click()
     await page.getByText(/字幕已导出/).waitFor()
-    assert.match(await readFile(srt, 'utf8'), /00:00:00,000 --> 00:00:07,500\n让灯塔指路。\n第二行 &lt;示例&gt; &amp; ｛虚构｝/)
+    assert.match(await readFile(srt, 'utf8'), /00:00:00,000 --> 00:00:07,500\n让灯塔指路。\n第二行 ＜示例＞ ＆ ｛虚构｝/)
     await button(stage(page), '重新生成预览').waitFor()
     await screenshot(page, 'feature-preview-rebuild.png')
     await button(stage(page), '顺序预览').click()
@@ -837,6 +850,10 @@ async function verifyLegacyUpgrade(folder) {
     assert.equal(before.length, after.length)
     assert.equal(after.filter(name => !before.includes(name)).length, 1)
     await button(page, '关闭预览').click()
+    return { original: fixture.root, upgraded: path.join(parent, copy), srt }
+  } catch (error) {
+    await page.screenshot({ path: path.join(folder, 'diagnostic-features-failure.png'), timeout: 3000 }).catch(() => {})
+    throw error
   } finally {
     await app.close()
   }
@@ -1228,17 +1245,21 @@ async function main() {
     assert.ok((await readdir(project)).every(name => !name.startsWith('.manju-render-')))
     await app.close()
     const portrait = await verifyCreative(folder, parent, path.join(folder, '竖屏 Electron Profile'))
-    await verifyLegacyUpgrade(folder)
+    const legacy = await verifyLegacyUpgrade(folder)
     await verifyUpdates(folder, project)
     assert.deepEqual(await documentAt(projectFile), finalManifest)
     await writeFile(path.join(folder, 'acceptance.json'), JSON.stringify({
-      project, destination, portrait, sha256: sha, restartedElectron: true, replacementStillActive: track.versions[1].id,
+      project, destination, portrait, legacy, sha256: sha, restartedElectron: true, replacementStillActive: track.versions[1].id,
       dialogCanceledPreservedHash: true, renderCanceledPreservedHash: true, missingAssetPreservedHash: true,
       temporaryDirectoriesCleaned: true, guideEmptyPartialComplete: true, guideExternalStubAndClipboard: true,
       guidePerEpisodeAndStaleAfterRestart: true, skippedVideoAndAudioRetainCaptions: true,
       updateFixtureNoReleaseAndNewVersion: true, updateFixtureCanceledAndVerified: true,
       updateFixtureNativeConfirmationCanceledAndDirtyBlocked: true,
       magpieDraftCancellationErrorAndConflictReview: true,
+      legacyUpgradeCancellationPreservedSource: true, legacyUpgradeCopiedMedia: true,
+      voiceDialogueConfirmedAndSrtExported: true, previewRebuildReplacedSessionCache: true,
+      emptyProjectPrimaryActionChangedAfterScript: true, briefScrollLabelVisibleAtMinimumSize: true,
+      gatewayModelListAndHtmlDistinguished: true, manualUpdateFallbackDidNotLaunchSetup: true,
     }, null, 2))
     await writeFile(path.join(verify, 'latest-success.txt'), folder + '\n')
     console.log('已有 MP4 保留，取消对话框 / 编码中取消 / 第四镜缺源三条路径 SHA-256 一致：', sha)

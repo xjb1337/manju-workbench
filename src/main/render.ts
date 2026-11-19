@@ -16,9 +16,9 @@ const asciiUnit = 55
 const shotCacheVersion = 'shot-cache-v3'
 
 function captionLines(value: string) {
-  // Keep literal punctuation outside ASS override and escape syntax.
-  const punctuation: Record<string, string> = { '\\': '＼', '{': '｛', '}': '｝' }
-  return value.trim().replace(/[\\{}]/g, char => punctuation[char])
+  // Use visible equivalents for ASS and SRT delimiters. SRT readers differ in whether they decode entities.
+  const punctuation: Record<string, string> = { '\\': '＼', '{': '｛', '}': '｝', '<': '＜', '>': '＞', '&': '＆' }
+  return value.trim().replace(/[\\{}<>&]/g, char => punctuation[char])
     .replace(/[\x00-\x09\x0b\x0c\x0e-\x1f]/g, '').split(/\r\n|\r|\n/)
 }
 
@@ -144,15 +144,12 @@ function srtTime(frames: number) {
 }
 
 export function episodeSrt(episode: Pick<Episode, 'shots'>, spec: FrameSpec) {
-  const escape = (line: string) => line.trim()
-    ? line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    : '\u00a0'
   let offset = 0
   let index = 0
   const blocks: string[] = []
   for (const shot of episode.shots) {
     for (const { start, end, lines } of subtitleCues(shot, spec)) {
-      blocks.push(`${++index}\n${srtTime(offset + start)} --> ${srtTime(offset + end)}\n${lines.map(escape).join('\n')}\n`)
+      blocks.push(`${++index}\n${srtTime(offset + start)} --> ${srtTime(offset + end)}\n${lines.map(line => line.trim() ? line : '\u00a0').join('\n')}\n`)
     }
     offset += shot.frames
   }

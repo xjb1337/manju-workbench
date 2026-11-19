@@ -225,6 +225,7 @@ dialog:has(.update-content) { width: min(560px, calc(100vw - 42px)); }
 .update-content { display: grid; gap: 8px; }
 .update-version { color: var(--muted); }
 .update-version strong { margin-left: 4px; }
+.update-target { color: var(--muted); overflow-wrap: anywhere; }
 .update-status { font-weight: 700; font-size: 16px; }
 .update-status:empty { display: none; }
 .update-notes { padding: 10px 12px; border-radius: 7px; background: var(--well); }

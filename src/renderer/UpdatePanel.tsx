@@ -28,8 +28,12 @@ export function UpdatePanel({ busy, dirty }: { busy: boolean; dirty: boolean }) 
       const reply = await invoke()
       if (reply.ok) accept(reply.value)
       else {
-        if (reply.code === 'update-package-invalid') setReady('')
-        setError(reply.error)
+        if (reply.code === 'update-package-invalid' || reply.code === 'update-manual-required') setReady('')
+        if (reply.code === 'update-manual-required') {
+          setCheck(current => current?.status === 'available'
+            ? { ...current, kind: null, directory: undefined, manual: true, unavailable: reply.error }
+            : current)
+        } else setError(reply.error)
       }
     } catch {
       setError('桌面进程连接中断')
@@ -104,6 +108,7 @@ export function UpdatePanel({ busy, dirty }: { busy: boolean; dirty: boolean }) 
         </section>}
         {available && <>
           {available.kind && <p className="update-version">{available.kind === 'setup' ? '安装版 · Windows x64' : '便携版 · Windows x64'}</p>}
+          {available.kind === 'setup' && available.directory && <p className="update-target">目标目录 <strong>{available.directory}</strong></p>}
           <p className="update-risk"><WarningCircle aria-hidden="true" size={18} />
             <span>应用未签名。SHA-256 仅验证文件完整性，无法证明发布者身份。</span>
           </p>
@@ -123,6 +128,8 @@ export function UpdatePanel({ busy, dirty }: { busy: boolean; dirty: boolean }) 
         {pending === 'download' ? <button onClick={() => void cancel()} disabled={canceling}>取消下载</button> : <>
           <button onClick={close} autoFocus disabled={starting || pending === 'install' || pending === 'folder'}>{dirtyBlocked ? '返回保存' : '关闭'}</button>
           <button onClick={refresh} disabled={!!pending || starting}>重新检查</button>
+          {available?.manual && <button className="primary" disabled={!!pending}
+            onClick={() => void action('folder', api.openUpdateReleasePage, () => {})}>打开发布页</button>}
           {available?.kind && <>
             <button className={ready ? undefined : 'primary'} onClick={download} disabled={!!pending || !!ready || !!available.unavailable}>下载</button>
             {available.kind === 'setup'

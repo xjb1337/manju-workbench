@@ -58,6 +58,7 @@ const bridge: Workbench = {
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   cancelUpdate: () => ipcRenderer.invoke('update:cancel'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
+  openUpdateReleasePage: () => ipcRenderer.invoke('update:open-releases'),
   openUpdateFolder: () => ipcRenderer.invoke('update:open-folder'),
   onUpdateProgress: listener => {
     const handler = (_event: Electron.IpcRendererEvent, value: UpdateProgress) => listener(value)
