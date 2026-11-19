@@ -5,12 +5,15 @@ import {
 } from '@phosphor-icons/react'
 import type { OpenProject, RenderProgress, Reply } from '../shared/api'
 import {
-  activeVersion, folderNameSchema, kinds, statuses, timecode, totalFrames, type Category, type Episode, type MediaTarget,
+  activeVersion, folderNameSchema, kinds, shotMedia, statuses, timecode, totalFrames, type Category, type Episode, type MediaTarget,
   type Mutation, type Project, type Shot, type ShotFields,
 } from '../shared/model'
-import { Badge, MediaRow, Modal, NameModal, TextEditor, Timeline, mediaUrl, sequence } from './components'
+import { productionProgress, type StepId } from '../shared/production'
+import { Badge, MediaRow, Modal, NameModal, TextEditor, Timeline, kindLabel, mediaUrl, sequence } from './components'
+import { ProductionGuide, isMediaStep } from './ProductionGuide'
 
 type Tab = 'shots' | 'script' | Category
+type EditorField = 'shot-prompt' | 'shot-video-prompt' | 'shot-dialogue'
 type Ask =
   | { kind: 'name'; title: string; initial?: string; confirm: string; action: (name: string) => Promise<boolean> }
   | { kind: 'remove'; title: string; name: string; change: Mutation }
@@ -25,6 +28,8 @@ export function App() {
   const [shotId, setShotId] = useState('')
   const [referenceId, setReferenceId] = useState('')
   const [tab, setTab] = useState<Tab>('shots')
+  const [guideStep, setGuideStep] = useState<StepId | null>(null)
+  const [focusField, setFocusField] = useState<EditorField | null>(null)
   const [scriptScope, setScriptScope] = useState<'project' | 'episode'>('project')
   const [editorRevision, setEditorRevision] = useState(0)
   const [dark, setDark] = useState(false)
@@ -41,11 +46,19 @@ export function App() {
   const category = tab === 'characters' || tab === 'scenes' ? tab : null
   const references = category && project ? project[category] : []
   const reference = references.find(item => item.id === referenceId) ?? references[0]
+  const guide = project && productionProgress(project, episode?.id)
+  const step = guideStep ?? guide?.recommended ?? 'export'
 
   useEffect(() => api.onProgress(setProgress), [])
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? 'dark' : 'light'
   }, [dark])
+  useEffect(() => {
+    if (focusField) {
+      document.getElementById(focusField)?.focus()
+      setFocusField(null)
+    }
+  }, [focusField])
   useEffect(() => {
     if (!message || message.error) return
     const timer = setTimeout(() => setMessage(null), 5000)
@@ -91,6 +104,7 @@ export function App() {
     setShotId('')
     setReferenceId('')
     setTab('shots')
+    setGuideStep(null)
     setScriptScope('project')
     setDirty(false)
   }
@@ -112,6 +126,41 @@ export function App() {
   }
   function activate(target: MediaTarget, id: string) {
     void edit({ type: 'media.activate', target, versionId: id })
+  }
+  function copyPrompt(text: string) {
+    void run(() => api.copy(text), () => setMessage({ text: '提示词已复制' }))
+  }
+
+  function goTo(nextTab: Tab, action?: () => void, replacesEditor = false) {
+    const open = () => {
+      if (nextTab !== tab) {
+        setTab(nextTab)
+        setReferenceId('')
+        setDirty(false)
+      }
+      action?.()
+    }
+    if (nextTab !== tab || replacesEditor) navigate(open)
+    else open()
+  }
+
+  function goToScript(scope: typeof scriptScope, action?: () => void) {
+    const open = () => { setScriptScope(scope); action?.() }
+    if (tab === 'script' && scriptScope !== scope) navigate(open)
+    else goTo('script', open)
+  }
+
+  function selectGuideStep(id: StepId) {
+    const select = () => setGuideStep(id)
+    if (id === 'script') {
+      goToScript(tab === 'script' ? scriptScope : episode?.script.trim() && !project?.script.trim() ? 'episode' : 'project', select)
+    } else if (id === 'references') {
+      goTo(category ?? guide?.missingReferences[0] ?? 'characters', select)
+    } else goTo('shots', select)
+  }
+
+  function selectShot(id: string) {
+    if (shot?.id !== id) goTo('shots', () => { setShotId(id); setDirty(false) }, true)
   }
 
   function addProject(sample: boolean) {
@@ -154,8 +203,12 @@ export function App() {
     try {
       await run(() => api.render(opened.mediaKey, episode.id, mode), result => {
         if (result.status === 'canceled') setMessage({ text: mode === 'export' ? '已取消导出' : '已取消预览' })
-        else if (mode === 'preview') setPlayer(result.location)
-        else setMessage({ text: `导出完成 · ${result.location}` })
+        else if (result.status === 'record-failed') setMessage({ text: `成片已导出 · 导出记录保存失败 · ${result.location}`, error: true })
+        else if (result.mode === 'preview') setPlayer(result.location)
+        else {
+          accept(result.project)
+          setMessage({ text: `导出完成 · ${result.location}` })
+        }
       })
     } finally {
       setProgress(null)
@@ -164,9 +217,50 @@ export function App() {
 
   const shotIndex = episode && shot ? episode.shots.indexOf(shot) : 0
   const start = episode?.shots.slice(0, shotIndex).reduce((time, item) => time + item.frames, 0) ?? 0
-  const visual = shot && activeVersion(shot.media.image)
-  const video = shot && activeVersion(shot.media.video)
+  const visual = shot && shotMedia(shot, 'image')
+  const video = shot && shotMedia(shot, 'video')
   const canRender = !!episode?.shots.length && !dirty && !busy
+
+  function guideActions() {
+    if (step === 'script') return <>
+      <button onClick={() => goToScript('project')} disabled={busy}>作品剧本</button>
+      {episode && <button onClick={() => goToScript('episode')} disabled={busy}>集数剧本</button>}
+    </>
+    if (step === 'references') return <>
+      <button onClick={() => goTo('characters')} disabled={busy}>角色参考</button>
+      <button onClick={() => goTo('scenes')} disabled={busy}>场景参考</button>
+      {category && (reference
+        ? <button onClick={() => importMedia({ scope: 'reference', category, referenceId: reference.id })} disabled={busy}>导入参考图</button>
+        : <button onClick={addReference} disabled={busy}>新建参考</button>)}
+    </>
+    if (!episode || !shot || step === 'shots') return <button className="primary" disabled={busy}
+      onClick={() => goTo('shots', episode ? addShot : addEpisode, true)}>{episode ? '新建镜头' : '新建集数'}</button>
+    if (step === 'export') return <button className="primary" disabled={!canRender} onClick={() => void render('export')}>导出 MP4</button>
+    if (isMediaStep(step)) {
+      const target = { scope: 'shot', episodeId: episode.id, shotId: shot.id, kind: step } as const
+      const omitted = !!shot.omittedMedia?.[step]
+      const omitLabel = { image: '跳过生图', video: '跳过视频', audio: '标为静默' }[step]
+      const focus = (field: EditorField) => goTo('shots', () => { setGuideStep(step); setFocusField(field) })
+      const prompt = step === 'video' ? shot.videoPrompt : shot.prompt
+      const tool = step === 'image' ? 'chatgpt' : 'flow'
+      return <>
+        {step === 'audio' ? <button disabled={busy} onClick={() => focus('shot-dialogue')}>编辑台词</button> : <>
+          <button disabled={busy} onClick={() => focus(step === 'video' ? 'shot-video-prompt' : 'shot-prompt')}>编辑提示词</button>
+          <button disabled={busy || !prompt?.trim()} onClick={() => prompt && copyPrompt(prompt)}>
+            {step === 'image' ? '复制生图提示词' : '复制视频提示词'}
+          </button>
+          <button disabled={busy} onClick={() => void run(() => api.openTool(tool))}>
+            {step === 'image' ? '打开 ChatGPT' : '打开 Google Flow'} <ArrowSquareOut size={14} />
+          </button>
+        </>}
+        <button className="primary" disabled={busy} onClick={() => importMedia(target)}>导入{kindLabel[step]}</button>
+        <button aria-pressed={omitted} disabled={busy} onClick={() => void edit({ type: 'shot.omit-media',
+          episodeId: episode.id, shotId: shot.id, kind: step, omitted: !omitted })}>
+          {omitted ? step === 'audio' ? '取消静默' : '取消跳过' : omitLabel}
+        </button>
+      </>
+    }
+  }
 
   return <div className="app">
     <header className="appbar">
@@ -202,12 +296,14 @@ export function App() {
             onClick={() => navigate(() => void run(() => api.close(), () => load(null)))}><X size={19} /></button>
         </div>
       </div>
+      {guide && <ProductionGuide progress={guide} step={step} episode={episode} shot={shot} busy={busy}
+        onStep={selectGuideStep} onShot={selectShot}>{guideActions()}</ProductionGuide>}
       <div className="workspace">
         <aside className="sidebar">
           <div className="section-head"><h2>作品目录</h2></div>
           <nav aria-label="作品目录">{tabs.map(({ id, text, icon: Icon }) => <button key={id} className="nav-entry"
             aria-current={tab === id ? 'page' : undefined} disabled={busy}
-            onClick={() => { if (tab !== id) navigate(() => { setTab(id); setReferenceId(''); setDirty(false) }) }}>
+            onClick={() => goTo(id)}>
             <Icon size={18} /><span>{text}</span>{(id === 'characters' || id === 'scenes') && <small>{project[id].length}</small>}
           </button>)}</nav>
           <div className="section-head episode-head"><h2>集数</h2>
@@ -247,7 +343,7 @@ export function App() {
             <button className="primary" disabled={busy} onClick={() => episode ? addShot() : addEpisode()}><Plus size={18} /> {episode ? '新建镜头' : '新建集数'}</button>
           </Empty>}
           {episode && !!episode.shots.length && <Timeline opened={opened} episode={episode} shotId={shot?.id} busy={busy}
-            onSelect={id => { if (shot?.id !== id) navigate(() => { setShotId(id); setDirty(false) }) }}
+            onSelect={selectShot}
             onAdd={() => navigate(addShot)} onMove={direction => shot && void edit({
               type: 'shot.move', episodeId: episode.id, shotId: shot.id, direction,
             })} />}
@@ -289,9 +385,10 @@ export function App() {
             </>}
         </main>}
         {tab === 'shots' && shot && episode && <Inspector key={shot.id + editorRevision} shot={shot} episode={episode} index={shotIndex} busy={busy}
+          showVideoPrompt={step === 'video'}
           onDirty={setDirty} onSave={fields => void edit({ type: 'shot.edit', episodeId: episode.id, shotId: shot.id, fields },
             () => setMessage({ text: '镜头已保存' }))}
-          onCopy={text => void run(() => api.copy(text), () => setMessage({ text: '提示词已复制' }))}
+          onCopy={copyPrompt}
           onImport={importMedia} onActivate={activate}
           onRemove={() => remove('删除镜头', shot.title, { type: 'shot.remove', episodeId: episode.id, shotId: shot.id })} />}
       </div>
@@ -330,23 +427,26 @@ function Empty({ icon, children }: { icon: ReactNode; children: ReactNode }) {
   return <div className="empty-stage"><div className="empty-icon">{icon}</div>{children}</div>
 }
 
-function Inspector({ shot, episode, index, busy, onSave, onCopy, onImport, onActivate, onRemove, onDirty }: {
-  shot: Shot; episode: Episode; index: number; busy: boolean
+function Inspector({ shot, episode, index, busy, showVideoPrompt, onSave, onCopy, onImport, onActivate, onRemove, onDirty }: {
+  shot: Shot; episode: Episode; index: number; busy: boolean; showVideoPrompt: boolean
   onSave: (fields: ShotFields) => void; onCopy: (text: string) => void; onImport: (target: MediaTarget) => void
   onActivate: (target: MediaTarget, id: string) => void; onRemove: () => void; onDirty: (value: boolean) => void
 }) {
   const [draft, setDraft] = useState(() => fieldsFor(shot))
-  const { title, frames, dialogue, prompt, status } = shot
-  useEffect(() => { setDraft({ title, seconds: String(Number((frames / 30).toFixed(3))), dialogue, prompt, status }) }, [title, frames, dialogue, prompt, status])
+  const { title, frames, dialogue, prompt, videoPrompt = '', status } = shot
+  useEffect(() => {
+    setDraft({ title, seconds: String(Number((frames / 30).toFixed(3))), dialogue, prompt, videoPrompt, status })
+  }, [title, frames, dialogue, prompt, videoPrompt, status])
   const dirty = draft.title.trim() !== title || Math.round(Number(draft.seconds) * 30) !== frames
-    || draft.dialogue !== dialogue || draft.prompt !== prompt || draft.status !== status
+    || draft.dialogue !== dialogue || draft.prompt !== prompt || draft.videoPrompt !== videoPrompt || draft.status !== status
   useEffect(() => { onDirty(dirty); return () => onDirty(false) }, [dirty, onDirty])
   return <aside className="inspector" aria-label="镜头编辑">
     <div className="section-head inspector-head"><div className="inspector-title"><span className="shot-number">{sequence(index)}</span><h2>镜头编辑</h2></div><Badge value={shot.status} /></div>
     <form onSubmit={event => {
       event.preventDefault()
       onSave({ title: draft.title.trim(), frames: Math.round(Number(draft.seconds) * 30),
-        dialogue: draft.dialogue, prompt: draft.prompt, status: draft.status })
+        dialogue: draft.dialogue, prompt: draft.prompt, status: draft.status,
+        ...(draft.videoPrompt !== videoPrompt && { videoPrompt: draft.videoPrompt }) })
     }}>
       <fieldset disabled={busy}>
         <label className="field">镜头名称<input required maxLength={100} value={draft.title} onChange={event => setDraft({ ...draft, title: event.target.value })} /></label>
@@ -356,11 +456,15 @@ function Inspector({ shot, episode, index, busy, onSave, onCopy, onImport, onAct
           <label className="field">状态<select aria-label="状态" value={draft.status} onChange={event => setDraft({ ...draft, status: event.target.value as ShotFields['status'] })}>
             {statuses.map(str => <option key={str}>{str}</option>)}</select></label>
         </div>
-        <label className="field">台词<textarea rows={2} maxLength={1000} value={draft.dialogue} onChange={event => setDraft({ ...draft, dialogue: event.target.value })} /></label>
+        <label className="field">台词<textarea id="shot-dialogue" rows={2} maxLength={1000} value={draft.dialogue} onChange={event => setDraft({ ...draft, dialogue: event.target.value })} /></label>
         <div className="prompt-field"><div className="field-header"><label htmlFor="shot-prompt">提示词</label>
           <button type="button" className="small subtle accent" disabled={!draft.prompt.trim()} onClick={() => onCopy(draft.prompt)}><Copy size={15} /> 复制提示词</button></div>
           <textarea id="shot-prompt" rows={3} maxLength={30000} value={draft.prompt} onChange={event => setDraft({ ...draft, prompt: event.target.value })} />
         </div>
+        {(showVideoPrompt || draft.videoPrompt !== videoPrompt) && <label className="field video-prompt">视频提示词
+          <textarea id="shot-video-prompt" rows={3} maxLength={30000} value={draft.videoPrompt}
+            onChange={event => setDraft({ ...draft, videoPrompt: event.target.value })} />
+        </label>}
         <div className="inspector-save"><button type="button" className="icon small subtle danger" title="删除镜头" aria-label="删除镜头" onClick={onRemove}><Trash size={17} /></button>
           <button type="submit" className="primary small" disabled={!dirty || !draft.title.trim()}><FloppyDisk size={15} /> 保存镜头</button></div>
       </fieldset>
@@ -376,5 +480,6 @@ function Inspector({ shot, episode, index, busy, onSave, onCopy, onImport, onAct
 }
 
 function fieldsFor(shot: Shot) {
-  return { title: shot.title, seconds: String(Number((shot.frames / 30).toFixed(3))), dialogue: shot.dialogue, prompt: shot.prompt, status: shot.status }
+  return { title: shot.title, seconds: String(Number((shot.frames / 30).toFixed(3))), dialogue: shot.dialogue,
+    prompt: shot.prompt, videoPrompt: shot.videoPrompt ?? '', status: shot.status }
 }

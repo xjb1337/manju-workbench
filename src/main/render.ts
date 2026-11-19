@@ -1,6 +1,6 @@
 import { lstat, mkdtemp, open, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { activeVersion, folderNameSchema, totalFrames, type Episode, type Shot } from '../shared/model'
+import { shotMedia, folderNameSchema, totalFrames, type Episode, type Shot } from '../shared/model'
 import { mediaInput, probe, runTool } from './process'
 import { checkedFile, type ProjectStore } from './storage'
 
@@ -45,8 +45,8 @@ function seconds(frames: number) {
 }
 
 async function encodeShot(store: ProjectStore, shot: Shot, filename: string, cwd: string, signal: AbortSignal) {
-  const visual = activeVersion(shot.media.video) ?? activeVersion(shot.media.image)
-  const voice = activeVersion(shot.media.audio)
+  const visual = shotMedia(shot, 'video') ?? shotMedia(shot, 'image')
+  const voice = shotMedia(shot, 'audio')
   const visualArgs = visual ? mediaInput(await store.assetPath(visual), visual.extension)
     : ['-f', 'lavfi', '-i', `color=c=black:s=${width}x${height}:r=${fps}`]
   const audioArgs = voice ? mediaInput(await store.assetPath(voice), voice.extension)

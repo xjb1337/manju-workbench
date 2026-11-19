@@ -9,7 +9,11 @@ export interface OpenProject {
 export type Reply<T> = { ok: true; value: T } | { ok: false; error: string }
 export type Tool = 'chatgpt' | 'flow'
 export type RenderProgress = { mode: 'preview' | 'export'; percent: number }
-export type RenderResult = { status: 'completed'; location: string } | { status: 'canceled' }
+export type RenderResult =
+  | { status: 'canceled' }
+  | { status: 'completed'; mode: 'preview'; location: string }
+  | { status: 'completed'; mode: 'export'; location: string; project: Project }
+  | { status: 'record-failed'; location: string }
 export interface Workbench {
   open(): Promise<Reply<OpenProject | null>>
   create(title: string, sample: boolean): Promise<Reply<OpenProject | null>>

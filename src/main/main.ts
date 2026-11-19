@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { z } from 'zod'
-import type { OpenProject, RenderProgress, Reply } from '../shared/api'
+import type { OpenProject, RenderProgress, RenderResult, Reply } from '../shared/api'
 import { extensions, folderNameSchema, idSchema, mediaTargetSchema } from '../shared/model'
 import { mediaResponse } from './media-protocol'
 import { exportDestination, renderEpisode } from './render'
@@ -125,7 +125,7 @@ function wire() {
     job.controller.abort()
     return true
   })
-  handle('episode:render', (win, key, id, value) => serial(async () => {
+  handle('episode:render', (win, key, id, value) => serial(async (): Promise<RenderResult> => {
     const store = getStore(key)
     const episode = findEpisode(store.snapshot, idSchema.parse(id))
     const mode = z.enum(['preview', 'export']).parse(value)
@@ -153,12 +153,21 @@ function wire() {
         }
       }
       await renderEpisode(store, episode, target, { signal, progress, publish: () => { state.publishing = true } })
-      if (!previewDir) return { status: 'completed', location: target } as const
+      if (!previewDir) {
+        try {
+          const project = await store.recordExport(episode)
+          return { status: 'completed', mode: 'export', location: target, project }
+        } catch (error) {
+          // The validated MP4 has been published. Report the separate project write failure.
+          console.error('episode:export-record', error)
+          return { status: 'record-failed', location: target }
+        }
+      }
       await dropPreview()
       const id = randomUUID()
       preview = { directory: previewDir, file: target, id }
       previewDir = undefined
-      return { status: 'completed', location: `manju-media://preview/${key}/${id}` } as const
+      return { status: 'completed', mode: 'preview', location: `manju-media://preview/${key}/${id}` }
     } catch (error) {
       if (signal.aborted) return { status: 'canceled' } as const
       throw error

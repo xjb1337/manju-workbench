@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowDown, ArrowUp, Check, FilmStrip, Image as ImageIcon, MusicNote, Plus, Trash, UploadSimple } from '@phosphor-icons/react'
 import type { OpenProject } from '../shared/api'
-import { activeVersion, timecode, type Episode, type MediaKind, type Track, type Version } from '../shared/model'
+import { activeVersion, shotMedia, timecode, type Episode, type MediaKind, type Track, type Version } from '../shared/model'
 
 export const kindLabel: Record<MediaKind, string> = { image: '参考图', video: '视频', audio: '配音' }
 const kindIcon = { image: ImageIcon, video: FilmStrip, audio: MusicNote }
@@ -47,7 +47,7 @@ export function Timeline({ opened, episode, shotId, busy, onSelect, onAdd, onMov
     </div>
     {!!episode.shots.length && <div className="filmstrip">
       {episode.shots.map((shot, position) => {
-        const image = activeVersion(shot.media.image)
+        const image = shotMedia(shot, 'image')
         const from = start
         start += shot.frames
         return <button key={shot.id} className="clip" disabled={busy} aria-pressed={shot.id === shotId} onClick={() => onSelect(shot.id)}

@@ -36,15 +36,20 @@ export const shotFields = z.object({
   frames: z.number().int().min(1).max(18_000),
   dialogue: z.string().max(1000, '台词最多 1,000 个字符'),
   prompt: notes,
+  videoPrompt: notes.optional(),
   status: z.enum(statuses),
 })
 export type ShotFields = z.infer<typeof shotFields>
 const shotSchema = shotFields.extend({
   id: idSchema,
   media: z.object({ image: trackSchema, video: trackSchema, audio: trackSchema }),
+  omittedMedia: z.partialRecord(kindSchema, z.literal(true)).optional(),
 })
 export type Shot = z.infer<typeof shotSchema>
-const episodeSchema = z.object({ id: idSchema, title: name, script: notes, shots: z.array(shotSchema).max(500) })
+const episodeSchema = z.object({
+  id: idSchema, title: name, script: notes, shots: z.array(shotSchema).max(500),
+  exportRecord: z.object({ exportedAt: z.iso.datetime(), stale: z.boolean() }).optional(),
+})
 export type Episode = z.infer<typeof episodeSchema>
 export const categorySchema = z.enum(['characters', 'scenes'])
 export type Category = z.infer<typeof categorySchema>
@@ -107,6 +112,7 @@ export const mutationSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('episode.remove'), episodeId: idSchema }),
   z.object({ type: z.literal('shot.add'), episodeId: idSchema, title: name }),
   z.object({ type: z.literal('shot.edit'), episodeId: idSchema, shotId: idSchema, fields: shotFields }),
+  z.object({ type: z.literal('shot.omit-media'), episodeId: idSchema, shotId: idSchema, kind: kindSchema, omitted: z.boolean() }),
   z.object({ type: z.literal('shot.remove'), episodeId: idSchema, shotId: idSchema }),
   z.object({ type: z.literal('shot.move'), episodeId: idSchema, shotId: idSchema, direction: z.union([z.literal(-1), z.literal(1)]) }),
   z.object({ type: z.literal('reference.add'), category: categorySchema, title: name }),
@@ -122,6 +128,10 @@ export function emptyTrack(): Track {
 
 export function activeVersion(track: Track) {
   return track.versions.find(version => version.id === track.activeId)
+}
+
+export function shotMedia(shot: Shot, kind: MediaKind) {
+  return shot.omittedMedia?.[kind] ? undefined : activeVersion(shot.media[kind])
 }
 
 export function totalFrames(episode: Episode) {

@@ -4,8 +4,9 @@ import { copyFile, lstat, mkdir, open, readFile, realpath, rename, rm, rmdir } f
 import path from 'node:path'
 import {
   emptyTrack, extensions, folderNameSchema, mediaTargetSchema, mutationSchema, projectSchema,
-  versionSchema, type MediaKind, type MediaTarget, type Mutation, type Project, type Version,
+  versionSchema, type Episode, type MediaKind, type MediaTarget, type Mutation, type Project, type Shot, type Version,
 } from '../shared/model'
+import { exportInputsChanged } from '../shared/production'
 import { mediaInput, probe, runTool } from './process'
 
 export const projectFilename = 'project.json'
@@ -73,6 +74,18 @@ function trackFor(project: Project, target: MediaTarget) {
     : findReference(project, target.category, target.referenceId).image
 }
 
+function setOmitted(shot: Shot, kind: MediaKind, omitted: boolean) {
+  if (omitted) shot.omittedMedia = { ...shot.omittedMedia, [kind]: true }
+  else if (shot.omittedMedia) {
+    delete shot.omittedMedia[kind]
+    if (!Object.keys(shot.omittedMedia).length) delete shot.omittedMedia
+  }
+}
+
+function resumeMedia(project: Project, target: MediaTarget) {
+  if (target.scope === 'shot') setOmitted(findShot(project, target.episodeId, target.shotId), target.kind, false)
+}
+
 function mutate(project: Project, change: Mutation) {
   switch (change.type) {
     case 'project.edit':
@@ -96,6 +109,9 @@ function mutate(project: Project, change: Mutation) {
       break
     case 'shot.edit':
       Object.assign(findShot(project, change.episodeId, change.shotId), change.fields)
+      break
+    case 'shot.omit-media':
+      setOmitted(findShot(project, change.episodeId, change.shotId), change.kind, change.omitted)
       break
     case 'shot.remove': {
       const episode = findEpisode(project, change.episodeId)
@@ -125,6 +141,7 @@ function mutate(project: Project, change: Mutation) {
       const track = trackFor(project, change.target)
       if (!track.versions.some(version => version.id === change.versionId)) throw new Error('素材版本不存在')
       track.activeId = change.versionId
+      resumeMedia(project, change.target)
       break
     }
   }
@@ -182,6 +199,12 @@ export class ProjectStore {
   }
 
   private async commit(next: Project) {
+    const previous = new Map(this.document.episodes.map(episode => [episode.id, episode]))
+    for (const episode of next.episodes) {
+      if (!episode.exportRecord || episode.exportRecord.stale) continue
+      const before = previous.get(episode.id)
+      if (before && exportInputsChanged(before, episode)) episode.exportRecord.stale = true
+    }
     const valid = projectSchema.parse(next)
     await atomicJson(path.join(this.root, projectFilename), valid)
     this.document = valid
@@ -193,6 +216,16 @@ export class ProjectStore {
     return this.queue(async () => {
       const next = this.snapshot
       mutate(next, change)
+      return this.commit(next)
+    })
+  }
+
+  recordExport(rendered: Episode) {
+    return this.queue(async () => {
+      const next = this.snapshot
+      const episode = findEpisode(next, rendered.id)
+      if (exportInputsChanged(rendered, episode)) throw new Error('成片内容已变更')
+      episode.exportRecord = { exportedAt: new Date().toISOString(), stale: false }
       return this.commit(next)
     })
   }
@@ -251,6 +284,7 @@ export class ProjectStore {
         const version = versionSchema.parse({ id, name: path.basename(source), extension, createdAt: new Date().toISOString(), seconds })
         track.versions.push(version)
         track.activeId = id
+        resumeMedia(project, target)
         return await this.commit(project)
       } catch (error) {
         if (archived) await rm(file, { force: true }).catch(() => {})
