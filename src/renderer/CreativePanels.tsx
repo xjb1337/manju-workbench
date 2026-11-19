@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { ArrowSquareOut, Copy, FloppyDisk } from '@phosphor-icons/react'
 import {
   defaultMethod, detailLabels, frameSpec, generationKindSchema, generationLabels, generationPresets, generationToolUrl,
@@ -17,6 +17,23 @@ type DetailAction = Extract<Mutation, { type: 'shot.detail' }>['action']
 const briefTextFields = ['theme', 'audience', 'style', 'language', 'tools', 'terms'] as const
 const generationKinds = generationKindSchema.options
 const emptyTool: GenerationTool = { name: '', url: '' }
+const magpieModelStorageKey = 'manju:magpie-model'
+
+function readMagpieModel() {
+  try {
+    const stored = localStorage.getItem(magpieModelStorageKey)
+    const parsed = stored ? magpieModelSchema.safeParse(stored) : null
+    return parsed?.success ? parsed.data : magpieDefaultModel
+  } catch {
+    return magpieDefaultModel
+  }
+}
+
+function saveMagpieModel(model: string) {
+  try {
+    localStorage.setItem(magpieModelStorageKey, model)
+  } catch {}
+}
 
 export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, onImport, onMagpie }: {
   project: Project; episode?: Episode; busy: boolean; onDirty: (dirty: boolean) => void
@@ -150,7 +167,7 @@ export function PlanningDialog({ project, episode, busy, copy, openTool, close }
 }) {
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
-  const text = planningPrompt(project, episode)
+  const text = useMemo(() => planningPrompt(project, episode), [project, episode])
   return <Modal title="总规划提示词" onClose={close}>
     <div className="creative-dialog">
       <textarea className="long-prompt" readOnly aria-label="总规划提示词内容" value={text} rows={15} />
@@ -178,7 +195,7 @@ export function PlanImportDialog({ episode, fictional, busy, source, onMerge, cl
   onMerge: (preview: PlanPreview, replacements: string[], failure: Failure) => void
 }) {
   const [text, setText] = useState(source.kind === 'magpie' ? source.script : '')
-  const [model, setModel] = useState(magpieDefaultModel)
+  const [model, setModel] = useState(readMagpieModel)
   const [preview, setPreview] = useState<PlanPreview>()
   const [replacements, setReplacements] = useState<string[]>([])
   const [error, setError] = useState('')
@@ -187,12 +204,19 @@ export function PlanImportDialog({ episode, fictional, busy, source, onMerge, cl
   useEffect(() => { if (preview && !busy) back.current?.focus() }, [preview, busy])
   const magpie = source.kind === 'magpie' ? source : undefined
   const title = magpie ? (preview ? 'AI 分镜草案预览' : 'AI 生成分镜草案') : (preview ? '规划导入预览' : '导入外部规划')
+  const conflictIds = preview ? preview.changes.filter(change => change.conflict).map(change => change.id) : []
   const stop = () => magpie?.cancel(setError)
   return <Modal title={title} onClose={busy && magpie && !preview ? stop : close}>
     <div className="creative-dialog">
       <div className="import-target">
         <span>{episode ? `目标集数 · ${episode.title}` : magpie ? '从草案创建集数' : '从规划创建集数'}</span>
         {fictional && <Badge value="示例 / 虚构" />}
+        {preview && !!conflictIds.length && <div className="plan-diff-actions">
+          <button type="button" className="small subtle" disabled={busy || !replacements.length}
+            onClick={() => setReplacements([])}>全部保留当前</button>
+          <button type="button" className="small subtle" disabled={busy || conflictIds.every(id => replacements.includes(id))}
+            onClick={() => setReplacements(conflictIds)}>{magpie ? '全部使用草案' : '全部使用导入'}</button>
+        </div>}
       </div>
       {preview ? <>
         <div className="plan-diff" role="region" aria-label="导入差异" tabIndex={0}>
@@ -233,6 +257,7 @@ export function PlanImportDialog({ episode, fictional, busy, source, onMerge, cl
           const validScript = magpieScriptSchema.safeParse(text)
           if (!validModel.success) { setError(validModel.error.issues[0].message); return }
           if (!validScript.success) { setError(validScript.error.issues[0].message); return }
+          saveMagpieModel(validModel.data)
           source.preview(validModel.data, validScript.data, draft => {
             if (draft) setPreview(draft)
             else setStopped(true)
@@ -266,7 +291,8 @@ export function DetailDialog({ project, episode, shot, kind, busy, onDirty, copy
 }) {
   const stored = shot.details?.[kind]
   const spec = frameSpec(project)
-  const template = shotPromptBody(project, episode, shot, kind)
+  const template = useMemo(() => shotPromptBody(project, episode, shot, kind), [project, episode, shot, kind])
+  const sharedContext = useMemo(() => shotPromptContext(project), [project])
   const baseline = stored?.body ?? template
   const [body, setBody] = useState(baseline)
   const [confirm, setConfirm] = useState<'regenerate' | 'discard' | null>(null)
@@ -290,7 +316,7 @@ export function DetailDialog({ project, episode, shot, kind, busy, onDirty, copy
         <span>{spec.ratio} · {spec.width} × {spec.height} · 30 fps</span>
       </div>
       <details className="prompt-settings"><summary>作品共享设定（复制时附上）</summary>
-        <pre>{shotPromptContext(project)}</pre>
+        <pre>{sharedContext}</pre>
       </details>
       <label className="field">提示词正文<textarea className="long-prompt" value={body} rows={13} maxLength={30000} disabled={busy || !!confirm}
         onChange={event => { setBody(event.target.value); setNotice('') }} /></label>

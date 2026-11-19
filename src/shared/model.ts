@@ -133,6 +133,7 @@ export const mutationSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('episode.edit'), episodeId: idSchema, title: titleSchema, script: notes }),
   z.object({ type: z.literal('episode.remove'), episodeId: idSchema }),
   z.object({ type: z.literal('shot.add'), episodeId: idSchema, title: titleSchema }),
+  z.object({ type: z.literal('shot.duplicate'), episodeId: idSchema, shotId: idSchema }),
   z.object({ type: z.literal('shot.edit'), episodeId: idSchema, shotId: idSchema, fields: shotFields }),
   z.object({ type: z.literal('shot.omit-media'), episodeId: idSchema, shotId: idSchema, kind: kindSchema, omitted: z.boolean() }),
   z.object({ type: z.literal('shot.remove'), episodeId: idSchema, shotId: idSchema }),
@@ -141,6 +142,7 @@ export const mutationSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('reference.edit'), category: categorySchema, referenceId: idSchema, title: titleSchema, notes }),
   z.object({ type: z.literal('reference.remove'), category: categorySchema, referenceId: idSchema }),
   z.object({ type: z.literal('media.activate'), target: mediaTargetSchema, versionId: idSchema }),
+  z.object({ type: z.literal('media.remove'), target: mediaTargetSchema, versionId: idSchema }),
 ])
 export type Mutation = z.infer<typeof mutationSchema>
 

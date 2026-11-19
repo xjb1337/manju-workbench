@@ -26,6 +26,7 @@ export type UpdateCheck = { currentVersion: string } & (
 )
 export type UpdateProgress = { received: number; total: number }
 export type UpdateDownload = { status: 'canceled' } | { status: 'ready'; fileName: string }
+export type OrphanMediaReport = { count: number; bytes: number }
 export interface Workbench {
   open(): Promise<Reply<OpenProject | null>>
   recentProjects(): Promise<Reply<RecentProject[]>>
@@ -38,6 +39,9 @@ export interface Workbench {
   cancelPlanGeneration(key: string): Promise<Reply<null>>
   mergePlan(key: string, token: string, replacements: string[]): Promise<Reply<Project>>
   importMedia(key: string, target: MediaTarget): Promise<Reply<Project | null>>
+  importDroppedMedia(key: string, target: MediaTarget, file: File): Promise<Reply<Project | null>>
+  inspectOrphanMedia(key: string): Promise<Reply<OrphanMediaReport>>
+  cleanOrphanMedia(key: string): Promise<Reply<OrphanMediaReport>>
   copy(text: string): Promise<Reply<null>>
   openTool(key: string, tool: Tool): Promise<Reply<null>>
   render(key: string, episodeId: string, mode: RenderProgress['mode']): Promise<Reply<RenderResult>>
@@ -50,4 +54,5 @@ export interface Workbench {
   openUpdateFolder(): Promise<Reply<null>>
   onUpdateProgress(listener: (event: UpdateProgress) => void): () => void
   setEditorDirty(dirty: boolean): Promise<Reply<null>>
+  setTheme(theme: 'light' | 'dark'): Promise<Reply<null>>
 }

@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 export function runTool(
   command: 'ffmpeg' | 'ffprobe',
   args: string[],
-  options: { cwd?: string; signal?: AbortSignal } = {},
+  options: { cwd?: string; signal?: AbortSignal; onStdoutLine?: (line: string) => void } = {},
 ): Promise<string> {
   options.signal?.throwIfAborted()
   return new Promise((resolve, reject) => {
@@ -13,9 +13,25 @@ export function runTool(
     })
     let stdout = ''
     let stderr = ''
+    let lineBuffer = ''
     let startError: Error | undefined
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
       stdout = (stdout + chunk).slice(-2_000_000)
+      if (!options.onStdoutLine) return
+      lineBuffer += chunk
+      let newline = lineBuffer.indexOf('\n')
+      while (newline !== -1) {
+        const line = lineBuffer.slice(0, newline).replace(/\r$/, '')
+        lineBuffer = lineBuffer.slice(newline + 1)
+        options.onStdoutLine(line)
+        newline = lineBuffer.indexOf('\n')
+      }
+    })
+    child.stdout.on('end', () => {
+      if (options.onStdoutLine && lineBuffer) {
+        options.onStdoutLine(lineBuffer.replace(/\r$/, ''))
+        lineBuffer = ''
+      }
     })
     child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
       stderr = (stderr + chunk).slice(-16_000)

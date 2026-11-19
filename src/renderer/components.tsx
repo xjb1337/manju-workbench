@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, Check, FilmStrip, Image as ImageIcon, MusicNote, Plus, Trash, UploadSimple } from '@phosphor-icons/react'
+import { useEffect, useRef, useState, type DragEvent, type ReactNode } from 'react'
+import { ArrowDown, ArrowUp, Check, Copy, FilmStrip, Image as ImageIcon, MusicNote, Pause, Play, Plus, Trash, UploadSimple } from '@phosphor-icons/react'
 import type { OpenProject } from '../shared/api'
 import { frameSpec, shotMethod, type Ratio } from '../shared/creative'
 import { activeVersion, shotVisual, timecode, type Episode, type MediaKind, type Track, type Version } from '../shared/model'
@@ -14,17 +14,64 @@ export function Badge({ value }: { value: string }) {
   return <span className={`badge ${color}`}>{value}</span>
 }
 
-export function MediaRow({ track, kind, busy, onImport, onActivate, onKeep }: {
-  track: Track; kind: MediaKind; busy: boolean; onImport: () => void; onActivate: (id: string) => void; onKeep: (id: string) => void
+export function MediaRow({ track, kind, opened, busy, onImport, onActivate, onKeep, onRemove, onDropFile }: {
+  track: Track; kind: MediaKind; opened?: OpenProject; busy: boolean; onImport: () => void
+  onActivate: (id: string) => void; onKeep: (id: string) => void
+  onRemove?: (id: string) => void; onDropFile?: (file: File) => void
 }) {
   const Icon = kindIcon[kind]
   const active = activeVersion(track)
-  return <div className="media-version"><div className="media-row">
+  const audio = useRef<HTMLAudioElement>(null)
+  const [playing, setPlaying] = useState(false)
+  const [dragActive, setDragActive] = useState(false)
+  useEffect(() => {
+    const element = audio.current
+    setPlaying(false)
+    return () => { element?.pause() }
+  }, [active?.id, opened?.mediaKey, kind])
+  useEffect(() => {
+    if (busy) setDragActive(false)
+  }, [busy])
+  const hasFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes('Files')
+  return <div className={dragActive ? 'media-version drop-active' : 'media-version'}
+    onDragOver={event => {
+      if (busy || !onDropFile || !hasFiles(event)) return
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'copy'
+      if (!dragActive) setDragActive(true)
+    }}
+    onDragLeave={event => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false)
+    }}
+    onDrop={event => {
+      if (!onDropFile) return
+      event.preventDefault()
+      setDragActive(false)
+      if (busy) return
+      const file = event.dataTransfer.files?.[0]
+      if (file) onDropFile(file)
+    }}><div className="media-row">
     <div className="asset-type"><span className="asset-icon"><Icon size={16} /></span><strong>{kindLabel[kind]}</strong></div>
     {active && <select aria-label={`${kindLabel[kind]}活动版本`} title={active.name} value={active.id} disabled={busy}
       onChange={event => onActivate(event.target.value)}>
       {track.versions.map((version, index) => <option key={version.id} value={version.id}>V{index + 1} · {version.name}{version.needsUpdate ? ' · 需更新' : ''}</option>)}
     </select>}
+    {kind === 'audio' && active && opened && <>
+      <audio key={active.id} ref={audio} src={mediaUrl(opened, active)} preload="none"
+        onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)} onError={() => setPlaying(false)} />
+      <button type="button" className="small icon subtle media-play"
+        title={playing ? '暂停试听' : '试听配音'} aria-label={playing ? '暂停试听配音' : '试听配音'}
+        aria-pressed={playing} disabled={busy} onClick={() => {
+          const element = audio.current
+          if (!element) return
+          if (element.paused) void element.play().catch(() => setPlaying(false))
+          else element.pause()
+        }}>{playing ? <Pause size={14} weight="fill" /> : <Play size={14} weight="fill" />}</button>
+    </>}
+    {active && onRemove && <button type="button" className="small icon subtle danger media-remove"
+      title={`删除${kindLabel[kind]}当前版本`} aria-label={`删除${kindLabel[kind]}当前版本`}
+      disabled={busy} onClick={() => onRemove(active.id)}><Trash size={14} /></button>}
     <button type="button" className="small subtle import" aria-label={`导入${kindLabel[kind]}`} disabled={busy} onClick={onImport}>
       <UploadSimple size={15} /> 导入
     </button>
@@ -35,9 +82,9 @@ export function MediaRow({ track, kind, busy, onImport, onActivate, onKeep }: {
   </div>}</div>
 }
 
-export function Timeline({ opened, episode, shotId, busy, onSelect, onAdd, onMove }: {
+export function Timeline({ opened, episode, shotId, busy, onSelect, onAdd, onMove, onDuplicate }: {
   opened: OpenProject; episode: Episode; shotId?: string; busy: boolean
-  onSelect: (id: string) => void; onAdd: () => void; onMove: (direction: -1 | 1) => void
+  onSelect: (id: string) => void; onAdd: () => void; onMove: (direction: -1 | 1) => void; onDuplicate: () => void
 }) {
   const index = episode.shots.findIndex(shot => shot.id === shotId)
   let start = 0
@@ -48,6 +95,7 @@ export function Timeline({ opened, episode, shotId, busy, onSelect, onAdd, onMov
       <div className="actions">
         <button className="icon small subtle" title="前移镜头" aria-label="前移镜头" onClick={() => onMove(-1)} disabled={busy || index <= 0}><ArrowUp size={16} /></button>
         <button className="icon small subtle" title="后移镜头" aria-label="后移镜头" onClick={() => onMove(1)} disabled={busy || index < 0 || index === episode.shots.length - 1}><ArrowDown size={16} /></button>
+        <button className="icon small subtle" title="复制镜头" aria-label="复制镜头" onClick={onDuplicate} disabled={busy || index < 0}><Copy size={16} /></button>
         <button className="small" onClick={onAdd} disabled={busy}><Plus size={16} /> 新建镜头</button>
       </div>
     </div>
@@ -85,6 +133,21 @@ export function PreviewPlayer({ source, ratio, onError }: { source: string; rati
     document.addEventListener('fullscreenchange', sync)
     return () => document.removeEventListener('fullscreenchange', sync)
   }, [])
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.code !== 'Space' && event.key !== ' ') return
+      if (event.repeat || event.ctrlKey || event.metaKey || event.altKey) return
+      const target = event.target as HTMLElement | null
+      if (target?.closest('button, input, select, textarea, a, [contenteditable="true"]')) return
+      const element = video.current
+      if (!element || !Number.isFinite(element.duration) || element.duration <= 0) return
+      event.preventDefault()
+      if (element.paused) void element.play().catch(onError)
+      else element.pause()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onError])
 
   const formatTime = (seconds: number) => timecode(Math.floor(seconds * 30))
   return <div className="preview-frame" ref={frame}>

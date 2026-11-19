@@ -1,12 +1,12 @@
-import { detailKindSchema, generationToolName, shotMethod } from '../shared/creative'
+import { detailGenerationKind, detailKindSchema, generationDetailKind, generationToolName, shotMethod, type GenerationKind } from '../shared/creative'
 import { kinds, type Episode, type Project, type Shot } from '../shared/model'
 import { legacyDetail, sharedSettingsKey } from '../shared/prompts'
 
 export function noteCreativeChanges(previous: Project, next: Project) {
   const sharedChanged = sharedSettingsKey(previous) !== sharedSettingsKey(next)
-  const toolChanged = {
+  const toolChanged: Record<GenerationKind, boolean> = {
     image: generationToolName(previous.brief?.generation?.image) !== generationToolName(next.brief?.generation?.image),
-    flow: generationToolName(previous.brief?.generation?.video) !== generationToolName(next.brief?.generation?.video),
+    video: generationToolName(previous.brief?.generation?.video) !== generationToolName(next.brief?.generation?.video),
   }
   const oldEpisodes = new Map(previous.episodes.map(episode => [episode.id, episode]))
   function positions(episode?: Episode) {
@@ -30,15 +30,19 @@ export function noteCreativeChanges(previous: Project, next: Project) {
       for (const kind of detailKindSchema.options) {
         const legacy = legacyDetail(shot, kind)
         const legacyChanged = legacyDetail(old.shot, kind) !== legacy
-        const generationChanged = (kind === 'image' || kind === 'flow') && toolChanged[kind]
+        const genKind = detailGenerationKind(kind)
+        const generationChanged = genKind !== undefined && toolChanged[genKind]
         const affected = sharedChanged || generationChanged || shotChanged || legacyChanged || (kind !== 'voice' && referenceChanged)
           || (kind === 'voice' && (old.shot.dialogue !== shot.dialogue || old.shot.omittedMedia?.audio !== shot.omittedMedia?.audio))
         const detail = shot.details?.[kind]
         const before = old.shot.details?.[kind]
         if (affected && detail && before?.body === detail.body && before.source === detail.source) detail.needsUpdate = true
-        if ((kind === 'image' || kind === 'flow') && legacyChanged && shot.legacyPromptReview) delete shot.legacyPromptReview[kind]
-        if ((sharedChanged || generationChanged) && !legacyChanged && legacy.trim() && (kind === 'image' || kind === 'flow')) {
-          (shot.legacyPromptReview ??= {})[kind] = true
+        if (genKind) {
+          const reviewKey = generationDetailKind(genKind)
+          if (legacyChanged && shot.legacyPromptReview) delete shot.legacyPromptReview[reviewKey]
+          if ((sharedChanged || generationChanged) && !legacyChanged && legacy.trim()) {
+            (shot.legacyPromptReview ??= {})[reviewKey] = true
+          }
         }
       }
       if (sharedChanged) for (const kind of kinds) {

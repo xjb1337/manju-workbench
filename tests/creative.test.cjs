@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict')
-const { mkdtemp, readFile, rm, writeFile } = require('node:fs/promises')
+const { lstat, mkdtemp, readdir, readFile, rm, writeFile } = require('node:fs/promises')
 const { tmpdir } = require('node:os')
 const path = require('node:path')
 const { test } = require('node:test')
@@ -297,4 +297,207 @@ test('共享设定使提示词和素材需更新，保留手改与确认重生�
   assert.match(suggested, /运行与导出命令/)
   assert.equal(shotMethod(store.snapshot, get()), 'flow')
   assert.deepEqual((await ProjectStore.open(store.root)).snapshot.episodes[0].shots[0], JSON.parse(JSON.stringify(get())))
+})
+
+test('中英与代码混排字幕按视觉宽度换行、不在英文词中间硬截断且保持分页与转义契约', () => {
+  const asciiFitsOneLine = 'alpha bravo charlie delta echo foxtrot'
+  const landscapeSingle = subtitles({ dialogue: asciiFitsOneLine, frames: 30 }, frameSpec({ brief: { ratio: '16:9' } }))
+  const singleEvents = landscapeSingle.split('\n').filter(line => line.startsWith('Dialogue: '))
+  assert.equal(singleEvents.length, 1)
+  assert.equal(singleEvents[0].split(',,0,0,0,,')[1], asciiFitsOneLine)
+
+  const mixed = [
+    '在 renderEpisode 中调用 calculateFrameBudget 和 parseSubtitleLine 完成 {导出} \\ 测试',
+    'const outputPath = path.join(publishDir, "complete.mp4")',
+    '请检查 superLongCamelCaseIdentifierNameWithoutSpaces1234567890 是否完整显示',
+  ].join('\n')
+  const protectedWords = ['renderEpisode', 'calculateFrameBudget', 'parseSubtitleLine', 'outputPath', 'publishDir']
+
+  for (const [ratio, width, height] of [['16:9', 1280, 720], ['9:16', 720, 1280]]) {
+    const body = subtitles({ dialogue: mixed, frames: 90 }, frameSpec({ brief: { ratio } }))
+    assert.match(body, new RegExp(`WrapStyle: 2\\nPlayResX: ${width}\\nPlayResY: ${height}`))
+    const events = body.split('\n').filter(line => line.startsWith('Dialogue: '))
+    const pages = events.map(event => event.split(',,0,0,0,,')[1].split('\\N'))
+    assert.ok(pages.every(page => page.length <= 4))
+    const lines = pages.flat()
+    for (const line of lines) {
+      assert.equal(line, line.trim())
+    }
+    const joined = lines.join('\n')
+    const flat = lines.join('')
+    assert.ok(flat.includes('｛导出｝'))
+    assert.ok(flat.includes('＼'))
+    for (const word of protectedWords) {
+      assert.ok(lines.some(line => line.includes(word)), `${ratio} 应保持完整单词 ${word}，实际为:\n${joined}`)
+    }
+    assert.equal(
+      lines.join('').replace(/\s+/g, ''),
+      '在renderEpisode中调用calculateFrameBudget和parseSubtitleLine完成｛导出｝＼测试constoutputPath=path.join(publishDir,"complete.mp4")请检查superLongCamelCaseIdentifierNameWithoutSpaces1234567890是否完整显示',
+    )
+  }
+  assert.throws(() => subtitles({ dialogue: mixed, frames: 1 }, frameSpec({ brief: { ratio: '9:16' } })), /镜头时长不足/)
+})
+
+test('多镜头并发渲染输出通过尺寸时长校验、平滑上报进度，且失败时保留已有文件并带镜头序号报错', async context => {
+  const { store, episodeId, shotId } = await setup(context)
+  await store.importMedia({ scope: 'shot', episodeId, shotId, kind: 'image' }, path.resolve('resources/sample/01.jpg'))
+  await store.edit({ type: 'shot.edit', episodeId, shotId, fields: {
+    title: '镜头一', frames: 24, dialogue: '镜头一 renderEpisode 测试', prompt: '首镜', status: '待审核',
+  } })
+  const shot2 = (await store.edit({ type: 'shot.add', episodeId, title: '镜头二' })).episodes[0].shots[1]
+  await store.edit({ type: 'shot.edit', episodeId, shotId: shot2.id, fields: {
+    title: '镜头二', frames: 30, dialogue: 'Shot 2 calculateBudget 混排字幕', prompt: '次镜', status: '待审核',
+  } })
+  const shot3 = (await store.edit({ type: 'shot.add', episodeId, title: '镜头三' })).episodes[0].shots[2]
+  await store.edit({ type: 'shot.edit', episodeId, shotId: shot3.id, fields: {
+    title: '镜头三', frames: 36, dialogue: '镜头三 concat 导出校验', prompt: '末镜', status: '待审核',
+  } })
+
+  const output = path.join(store.root, 'multi-shot.mp4')
+  const percents = []
+  const signal = AbortSignal.timeout(30_000)
+  await renderEpisode(store, store.snapshot.episodes[0], output, {
+    signal,
+    project: store.snapshot,
+    progress: value => percents.push(value),
+  })
+
+  assert.ok(percents.length >= 2)
+  assert.equal(percents.at(-1), 100)
+  for (let i = 0; i < percents.length; i++) {
+    if (i > 0) assert.ok(percents[i] >= percents[i - 1], `进度应单调递增: ${percents}`)
+    if (i < percents.length - 1) assert.ok(percents[i] >= 0 && percents[i] <= 94)
+  }
+
+  const info = await probe(output, 'mp4', signal)
+  const video = info.streams.find(stream => stream.codec_type === 'video')
+  const audio = info.streams.find(stream => stream.codec_type === 'audio')
+  assert.equal(video.codec_name, 'h264')
+  assert.deepEqual([video.width, video.height], [1280, 720])
+  assert.equal(audio.codec_name, 'aac')
+  assert.ok(Math.abs(Number(info.format.duration) - (24 + 30 + 36) / 30) <= 0.10)
+
+  const existingBytes = await readFile(output)
+  await store.edit({ type: 'shot.edit', episodeId, shotId: shot2.id, fields: {
+    title: '镜头二', frames: 1, dialogue: Array.from({ length: 10 }, (_, i) => `第 ${i + 1} 行`).join('\n'), prompt: '次镜', status: '待审核',
+  } })
+  await assert.rejects(
+    renderEpisode(store, store.snapshot.episodes[0], output, { signal, project: store.snapshot }),
+    /镜头 2 · 镜头时长不足/,
+  )
+  assert.deepEqual(await readFile(output), existingBytes)
+})
+
+test('cacheDir 复用镜头分片缓存，修改单镜台词或时长仅重编码变更镜头', async context => {
+  const { store, episodeId, shotId } = await setup(context)
+  await store.importMedia({ scope: 'shot', episodeId, shotId, kind: 'image' }, path.resolve('resources/sample/01.jpg'))
+  await store.edit({ type: 'shot.edit', episodeId, shotId, fields: {
+    title: '缓存镜头一', frames: 24, dialogue: '镜头一初始台词', prompt: '首镜', status: '待审核',
+  } })
+  const shot2 = (await store.edit({ type: 'shot.add', episodeId, title: '缓存镜头二' })).episodes[0].shots[1]
+  await store.edit({ type: 'shot.edit', episodeId, shotId: shot2.id, fields: {
+    title: '缓存镜头二', frames: 30, dialogue: '镜头二初始台词', prompt: '次镜', status: '待审核',
+  } })
+
+  const cacheDir = await mkdtemp(path.join(tmpdir(), 'manju-shot-cache-test-'))
+  context.after(() => rm(cacheDir, { recursive: true, force: true }))
+  const signal = AbortSignal.timeout(30_000)
+
+  const previewOutput = path.join(store.root, 'preview-cached.mp4')
+  await renderEpisode(store, store.snapshot.episodes[0], previewOutput, {
+    signal,
+    project: store.snapshot,
+    cacheDir,
+  })
+  const firstEntries = (await readdir(cacheDir)).sort()
+  assert.equal(firstEntries.length, 2)
+  assert.ok(firstEntries.every(name => /^[0-9a-f]{64}\.mov$/.test(name)))
+  const firstStats = new Map()
+  for (const name of firstEntries) {
+    const info = await lstat(path.join(cacheDir, name))
+    assert.ok(info.isFile() && info.size > 0)
+    firstStats.set(name, { ino: info.ino, mtimeMs: info.mtimeMs })
+  }
+
+  const exportOutput = path.join(store.root, 'export-cached.mp4')
+  const exportPercents = []
+  await renderEpisode(store, store.snapshot.episodes[0], exportOutput, {
+    signal,
+    project: store.snapshot,
+    cacheDir,
+    progress: value => exportPercents.push(value),
+  })
+  assert.equal(exportPercents.at(-1), 100)
+  assert.deepEqual((await readdir(cacheDir)).sort(), firstEntries)
+  for (const name of firstEntries) {
+    const info = await lstat(path.join(cacheDir, name))
+    assert.equal(info.ino, firstStats.get(name).ino)
+    assert.equal(info.mtimeMs, firstStats.get(name).mtimeMs)
+  }
+
+  for (const [file, expectedDuration] of [[previewOutput, (24 + 30) / 30], [exportOutput, (24 + 30) / 30]]) {
+    const probeInfo = await probe(file, 'mp4', signal)
+    const video = probeInfo.streams.find(stream => stream.codec_type === 'video')
+    const audio = probeInfo.streams.find(stream => stream.codec_type === 'audio')
+    assert.equal(video.codec_name, 'h264')
+    assert.deepEqual([video.width, video.height], [1280, 720])
+    assert.equal(audio.codec_name, 'aac')
+    assert.ok(Math.abs(Number(probeInfo.format.duration) - expectedDuration) <= 0.10)
+  }
+
+  await store.edit({ type: 'shot.edit', episodeId, shotId: shot2.id, fields: {
+    title: '缓存镜头二', frames: 45, dialogue: '镜头二台词已修改', prompt: '次镜', status: '待审核',
+  } })
+  const updatedOutput = path.join(store.root, 'updated-cached.mp4')
+  await renderEpisode(store, store.snapshot.episodes[0], updatedOutput, {
+    signal,
+    project: store.snapshot,
+    cacheDir,
+  })
+  const updatedEntries = (await readdir(cacheDir)).sort()
+  assert.equal(updatedEntries.length, 3)
+  assert.ok(updatedEntries.every(name => /^[0-9a-f]{64}\.mov$/.test(name)))
+  for (const name of firstEntries) {
+    assert.ok(updatedEntries.includes(name))
+    const info = await lstat(path.join(cacheDir, name))
+    assert.equal(info.ino, firstStats.get(name).ino)
+    assert.equal(info.mtimeMs, firstStats.get(name).mtimeMs)
+  }
+
+  const updatedProbe = await probe(updatedOutput, 'mp4', signal)
+  const updatedVideo = updatedProbe.streams.find(stream => stream.codec_type === 'video')
+  assert.deepEqual([updatedVideo.width, updatedVideo.height], [1280, 720])
+  assert.ok(Math.abs(Number(updatedProbe.format.duration) - (24 + 45) / 30) <= 0.10)
+})
+
+test('cacheDir 命中缓存前校验源素材存在性，源文件被移除时报错素材文件不存在', async context => {
+  const { store, episodeId, shotId } = await setup(context)
+  await store.importMedia({ scope: 'shot', episodeId, shotId, kind: 'image' }, path.resolve('resources/sample/01.jpg'))
+  const shot2 = (await store.edit({ type: 'shot.add', episodeId, title: '缺失素材镜头' })).episodes[0].shots[1]
+  await store.importMedia({ scope: 'shot', episodeId, shotId: shot2.id, kind: 'image' }, path.resolve('resources/sample/02.jpg'))
+
+  const cacheDir = await mkdtemp(path.join(tmpdir(), 'manju-shot-cache-missing-'))
+  context.after(() => rm(cacheDir, { recursive: true, force: true }))
+  const signal = AbortSignal.timeout(30_000)
+
+  const firstOutput = path.join(store.root, 'cached-first.mp4')
+  await renderEpisode(store, store.snapshot.episodes[0], firstOutput, {
+    signal,
+    project: store.snapshot,
+    cacheDir,
+  })
+
+  const missingVersion = store.snapshot.episodes[0].shots[1].media.image.versions[0]
+  const missingFile = await store.assetPath(missingVersion)
+  await rm(missingFile)
+
+  const secondOutput = path.join(store.root, 'cached-second.mp4')
+  await assert.rejects(
+    renderEpisode(store, store.snapshot.episodes[0], secondOutput, {
+      signal,
+      project: store.snapshot,
+      cacheDir,
+    }),
+    /镜头 2 · 素材文件不存在/,
+  )
 })

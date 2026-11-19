@@ -17,13 +17,18 @@ export function rangeFor(header: string | null, size: number) {
   return Number.isSafeInteger(start) && Number.isSafeInteger(end) && start <= end ? { start, end } : null
 }
 
-export async function mediaResponse(request: Request, file: string, extension: string) {
+export async function mediaResponse(
+  request: Request,
+  file: string,
+  extension: string,
+  options?: { cacheControl?: string },
+) {
   if (request.method !== 'GET' && request.method !== 'HEAD') return new Response(null, { status: 405 })
   const { size } = await checkedFile(file)
   const range = rangeFor(request.headers.get('Range'), size)
   const headers = new Headers({
     'Accept-Ranges': 'bytes', 'Content-Type': contentTypes[extension] ?? 'application/octet-stream',
-    'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff', 'Cache-Control': options?.cacheControl ?? 'no-store',
   })
   if (range === null) {
     headers.set('Content-Range', `bytes */${size}`)

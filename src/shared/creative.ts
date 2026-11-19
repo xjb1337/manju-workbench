@@ -18,6 +18,31 @@ export type Ratio = z.infer<typeof ratioSchema>
 export const generationKindSchema = z.enum(['image', 'video'])
 export type GenerationKind = z.infer<typeof generationKindSchema>
 export const generationLabels = { image: '生图', video: '视频制作' } as const
+
+const detailToGeneration: Partial<Record<DetailKind, GenerationKind>> = {
+  image: 'image',
+  flow: 'video',
+}
+
+const generationToDetail: Record<GenerationKind, 'image' | 'flow'> = {
+  image: 'image',
+  video: 'flow',
+}
+
+/** Maps internal detail keys (`flow` in v1/v2 projects) to external plan keys (`video`). */
+export function externalDetailKey(kind: DetailKind): 'image' | 'video' | 'code' | 'voice' {
+  return kind === 'flow' ? 'video' : kind
+}
+
+/** Maps a generation tool kind (`image` / `video`) to its internal detail/review key (`image` / `flow`). */
+export function generationDetailKind(kind: GenerationKind): 'image' | 'flow' {
+  return generationToDetail[kind]
+}
+
+/** Maps an internal detail kind to its generation tool kind, or `undefined` when none applies. */
+export function detailGenerationKind(kind: DetailKind): GenerationKind | undefined {
+  return detailToGeneration[kind]
+}
 export const generationToolUrl = z.string().trim().max(2048).refine(value => {
   if (!value) return true
   if (!/^https?:\/\//i.test(value) || /[\\\x00-\x1f\x7f]/.test(value)) return false

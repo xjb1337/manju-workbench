@@ -5,6 +5,10 @@ const { tmpdir } = require('node:os')
 const path = require('node:path')
 const { test } = require('node:test')
 const { emptyTrack, kinds, projectSchema, shotMedia } = require('../dist/shared/model')
+const {
+  detailGenerationKind, detailKindSchema, externalDetailKey, generationDetailKind, generationKindSchema, methodSchema,
+} = require('../dist/shared/creative')
+const { externalMethod, magpiePlanSchema, storedMethod } = require('../dist/shared/plan')
 const { productionProgress, productionSteps, exportFallbacks, exportInputsChanged } = require('../dist/shared/production')
 const { ProjectStore } = require('../dist/main/storage')
 
@@ -185,4 +189,58 @@ test('主进程保存的 A 集导出不会影响 B 集，修改素材后过期�
   assert.deepEqual((await ProjectStore.open(store.root)).snapshot, JSON.parse(JSON.stringify(old)))
   const exportedAgain = await store.recordExport(old.episodes[0])
   assert.equal(productionProgress(exportedAgain, first).statuses.export, 'complete')
+})
+
+test('共享领域映射收敛内部 flow 与外部 video/规划命名边界并保持往返兼容', () => {
+  assert.deepEqual(
+    detailKindSchema.options.map(kind => [kind, externalDetailKey(kind)]),
+    [['image', 'image'], ['flow', 'video'], ['code', 'code'], ['voice', 'voice']],
+  )
+
+  assert.equal(generationDetailKind('image'), 'image')
+  assert.equal(generationDetailKind('video'), 'flow')
+  assert.equal(generationDetailKind('unknown'), undefined)
+
+  assert.equal(detailGenerationKind('image'), 'image')
+  assert.equal(detailGenerationKind('flow'), 'video')
+  assert.equal(detailGenerationKind('code'), undefined)
+  assert.equal(detailGenerationKind('voice'), undefined)
+  assert.equal(detailGenerationKind('unknown'), undefined)
+
+  for (const kind of generationKindSchema.options) {
+    assert.equal(detailGenerationKind(generationDetailKind(kind)), kind)
+  }
+  for (const kind of ['image', 'flow']) {
+    assert.equal(generationDetailKind(detailGenerationKind(kind)), kind)
+  }
+
+  assert.deepEqual(
+    methodSchema.options.map(method => [method, externalMethod(method)]),
+    [['flow', 'image-video'], ['image', 'image'], ['flow-only', 'video-only'], ['code', 'code'], ['imported', 'imported']],
+  )
+  for (const method of methodSchema.options) {
+    const external = externalMethod(method)
+    assert.equal(storedMethod(external), method)
+    assert.equal(externalMethod(storedMethod(external)), external)
+  }
+
+  assert.equal(magpiePlanSchema.safeParse({
+    schemaVersion: 1,
+    episode: {
+      shots: [{
+        title: '边界检查',
+        frames: 30,
+        method: externalMethod('flow'),
+        details: { [externalDetailKey('flow')]: '视频提示词' },
+      }],
+    },
+  }).success, true)
+  assert.equal(magpiePlanSchema.safeParse({
+    schemaVersion: 1,
+    episode: { shots: [{ title: '旧键直传', frames: 30, method: 'flow' }] },
+  }).success, false)
+  assert.equal(magpiePlanSchema.safeParse({
+    schemaVersion: 1,
+    episode: { shots: [{ title: '旧详情直传', frames: 30, details: { flow: '视频提示词' } }] },
+  }).success, false)
 })
