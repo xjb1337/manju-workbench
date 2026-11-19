@@ -37,11 +37,12 @@ const trackSchema = z.object({
   : track.versions.some(version => version.id === track.activeId), '活动版本不存在')
 export type Track = z.infer<typeof trackSchema>
 
+export const shotDialogueSchema = z.string().max(1000, '台词最多 1,000 个字符')
 export const shotFields = z.object({
   title: titleSchema,
   // Whole 1/30-second frames keep timeline, picture and audio boundaries aligned.
   frames: z.number().int().min(1).max(18_000),
-  dialogue: z.string().max(1000, '台词最多 1,000 个字符'),
+  dialogue: shotDialogueSchema,
   prompt: notes,
   videoPrompt: notes.optional(),
   method: methodSchema.optional(),
@@ -126,6 +127,9 @@ export const mutationSchema = z.discriminatedUnion('type', [
       z.object({ type: z.literal('regenerate') }),
       z.object({ type: z.literal('keep') }),
     ]),
+  }),
+  z.object({ type: z.literal('shot.apply-voice'), episodeId: idSchema, shotId: idSchema,
+    before: shotDialogueSchema, voiceBody: detailTextSchema, dialogue: shotDialogueSchema.refine(value => !!value.trim(), '台词不能为空'),
   }),
   z.object({ type: z.literal('media.keep'), target: mediaTargetSchema, versionId: idSchema }),
   z.object({ type: z.literal('project.edit'), title: titleSchema, script: notes }),

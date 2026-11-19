@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
-import { copyFile, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, rmdir } from 'node:fs/promises'
+import { copyFile, cp, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, rmdir } from 'node:fs/promises'
 import path from 'node:path'
 import { lock } from 'proper-lockfile'
 import {
@@ -165,6 +165,14 @@ function mutate(project: Project, change: Mutation) {
       }
       break
     }
+    case 'shot.apply-voice': {
+      const shot = findShot(project, change.episodeId, change.shotId)
+      if (shot.dialogue !== change.before || shot.details?.voice?.body !== change.voiceBody) {
+        throw new Error('台词或配音稿已变更，请重新预览差异')
+      }
+      shot.dialogue = change.dialogue
+      break
+    }
     case 'media.keep': {
       const version = trackFor(project, change.target).versions.find(item => item.id === change.versionId)
       if (!version) throw new Error('素材版本不存在')
@@ -322,6 +330,58 @@ export class ProjectStore {
     return new ProjectStore(root, document, json)
   }
 
+  get needsUpgrade() {
+    return this.document.schemaVersion !== projectSchemaVersion
+  }
+
+  upgradeCopy(confirm: () => Promise<boolean>) {
+    return this.queue(async () => {
+      if (!this.needsUpgrade) return this
+      if (!await confirm()) return null
+      const source = path.join(this.root, projectFilename)
+      const assertUnchanged = async () => {
+        if (await readProjectFile(source) !== this.savedJson) {
+          throw new Error('磁盘上的作品已变更，请重新打开作品后再升级')
+        }
+      }
+      await assertUnchanged()
+      const parent = path.dirname(this.root)
+      const staging = await mkdtemp(path.join(parent, '.manju-upgrade-'))
+      const safeTitle = Array.from(this.document.title).slice(0, 30).join('').replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ')
+      const name = folderNameSchema.safeParse(`${safeTitle.trim()} - 格式 2 副本`)
+      const target = path.join(parent, `${name.success ? name.data : '格式 2 副本'} - ${randomUUID()}`)
+      try {
+        const sourceMedia = await checkedDirectory(path.join(this.root, directoryName))
+        await cp(sourceMedia, path.join(staging, directoryName), {
+          recursive: true, force: false, errorOnExist: true,
+          filter: async entry => {
+            const info = await lstat(entry)
+            if (!info.isFile() && !info.isDirectory()) throw new Error('媒体目录包含链接或特殊文件，无法安全复制')
+            return true
+          },
+        })
+        for (const version of this.versionIndex.values()) {
+          await checkedFile(path.join(staging, directoryName, `${version.id}.${version.extension}`))
+        }
+        const document = projectSchema.parse({ ...this.document, schemaVersion: projectSchemaVersion })
+        const json = await atomicJson(path.join(staging, projectFilename), document)
+        await assertUnchanged()
+        await safeRename(staging, target)
+        const copy = new ProjectStore(target, document, json)
+        if (this.pendingPlan?.base === this.document) {
+          copy.pendingPlan = { ...this.pendingPlan, base: document }
+        }
+        return copy
+      } finally {
+        await rm(staging, { recursive: true, force: true }).catch(() => {})
+      }
+    })
+  }
+
+  private assertWritable() {
+    if (this.needsUpgrade) throw new Error('请先保留原件并升级副本')
+  }
+
   get snapshot() {
     return structuredClone(this.document)
   }
@@ -333,6 +393,7 @@ export class ProjectStore {
   }
 
   private async commit(next: Project) {
+    this.assertWritable()
     noteCreativeChanges(this.document, next)
     const ratioChanged = frameSpec(this.document).ratio !== frameSpec(next).ratio
     const previous = new Map(this.document.episodes.map(episode => [episode.id, episode]))
@@ -423,7 +484,10 @@ export class ProjectStore {
   }
 
   cleanOrphanMedia() {
-    return this.queue(() => this.scanOrphanMedia(true))
+    return this.queue(() => {
+      this.assertWritable()
+      return this.scanOrphanMedia(true)
+    })
   }
 
   previewPlan(episodeInput: unknown, input: unknown, source: 'import' | 'magpie' = 'import'): Promise<PlanPreview> {
@@ -441,6 +505,7 @@ export class ProjectStore {
     const token = idSchema.parse(tokenInput)
     const choices = z.array(z.string().regex(/^\d+$/)).max(5000).parse(choicesInput)
     return this.queue(async () => {
+      this.assertWritable()
       const pending = this.pendingPlan
       if (!pending || pending.token !== token || pending.base !== this.document) {
         throw new Error('规划预览已失效，请重新预览')
@@ -474,6 +539,7 @@ export class ProjectStore {
     const target = mediaTargetSchema.parse(input)
     const kind: MediaKind = target.scope === 'shot' ? target.kind : 'image'
     return this.queue(async () => {
+      this.assertWritable()
       const project = this.snapshot
       const track = trackFor(project, target)
       const extension = path.extname(source).slice(1).toLowerCase()

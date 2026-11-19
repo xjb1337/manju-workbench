@@ -139,7 +139,7 @@ async function verifyMagpieDraft(app, page, file, first) {
     }
   }, first.id)
   try {
-    await button(stage(page), 'AI 生成分镜草案').click()
+    await button(stage(page), before.script.trim() || before.episodes[0]?.script.trim() ? 'AI 生成分镜草案' : '粘贴剧本').click()
     const dialog = page.getByRole('dialog', { name: 'AI 生成分镜草案', exact: true })
     const script = '虚构剧本片段：画面出现一束信号。'
     assert.equal(await dialog.getByLabel('Magpie 模型 ID').inputValue(), 'group/never-stuck')
@@ -183,6 +183,9 @@ async function verifyAiWorkbenchFlows(app, page, file, first) {
     globalThis.restoreAiFetch = () => { globalThis.fetch = original }
     globalThis.aiRequests = []
     globalThis.fetch = async (url, init) => {
+      if (url === 'http://127.0.0.1:19443/v1/models') {
+        return new Response('<html>Fixture</html>', { headers: { 'content-type': 'text/html' } })
+      }
       if (url === 'http://127.0.0.1:11434/v1/models') {
         return Response.json({ data: [{ id: 'qwen2.5:14b' }, { id: 'llama3.2:latest' }] })
       }
@@ -204,7 +207,27 @@ async function verifyAiWorkbenchFlows(app, page, file, first) {
     await settings.getByLabel('网关预设').selectOption('ollama')
     assert.equal(await settings.getByLabel('网关地址').inputValue(), 'http://127.0.0.1:11434/v1')
     await button(settings, '测试连接').click()
-    await settings.getByRole('status').getByText(/已连接.*2 个模型/).waitFor()
+    const status = settings.getByRole('status')
+    await status.getByText(/^服务可达/).waitFor()
+    await status.getByText('模型列表有效（2 个模型）', { exact: true }).waitFor()
+    await status.getByText('当前模型生成未验证', { exact: true }).waitFor()
+    await screenshot(page, 'feature-gateway-valid-model-list.png')
+    await settings.getByLabel('网关地址').fill('http://127.0.0.1:19443/v1')
+    assert.equal(await status.count(), 0)
+    assert.equal(await button(settings, 'llama3.2:latest').count(), 0)
+    await button(settings, '测试连接').click()
+    await status.getByText(/^服务可达/).waitFor()
+    await status.getByText('模型列表无效', { exact: true }).waitFor()
+    await status.getByText('/models 返回 HTTP 200 HTML', { exact: true }).waitFor()
+    await status.getByText('当前模型生成未验证', { exact: true }).waitFor()
+    assert.equal(await button(settings, 'llama3.2:latest').count(), 0)
+    assert.equal(await app.evaluate(() => globalThis.aiRequests.length), 0)
+    await screenshot(page, 'feature-gateway-http-200-html.png')
+    await settings.getByLabel('网关预设').selectOption('lmstudio')
+    assert.equal(await status.count(), 0)
+    await settings.getByLabel('网关预设').selectOption('ollama')
+    await button(settings, '测试连接').click()
+    await status.getByText('模型列表有效（2 个模型）', { exact: true }).waitFor()
     await settings.getByRole('button', { name: 'llama3.2:latest' }).click()
     assert.equal(await settings.getByLabel('默认模型 ID').inputValue(), 'llama3.2:latest')
     await button(settings, '保存设置').click()
@@ -267,6 +290,7 @@ async function verifyUpdates(folder, project) {
       globalThis.updateConfirmations = 0
       dialog.showMessageBox = async (_window, options) => {
         if (options.title !== '安装更新' || options.defaultId !== 0 || options.cancelId !== 0) throw new Error('Unexpected confirmation')
+        if (!options.detail.includes(globalThis.updateTarget.directory)) throw new Error('Missing target directory')
         globalThis.updateConfirmations++
         return { response: 0 }
       }
@@ -341,6 +365,8 @@ async function verifyUpdates(folder, project) {
     assert.equal(await script.inputValue(), '虚构验收 · 尚未保存')
     await script.fill(before)
     await footerSaved(page)
+
+
     await guide(page).waitFor()
     const [packageDirectory] = await readdir(temp)
     await rename(path.join(temp, packageDirectory, fixture.fileName), path.join(folder, '移走的测试更新包.exe'))
@@ -352,6 +378,15 @@ async function verifyUpdates(folder, project) {
     await button(panel, '下载').click()
     await panel.getByText('已通过完整性校验', { exact: false }).waitFor()
     assert.deepEqual(await app.evaluate(() => globalThis.updateLaunches), [])
+    await app.evaluate(() => { globalThis.updateTarget = { kind: 'manual' } })
+    await button(panel, '安装').click()
+    await panel.getByRole('alert').getByText('安装来源与当前目录无法匹配，请手动更新。', { exact: true }).waitFor()
+    assert.equal(await button(panel, '安装').count(), 0)
+    assert.equal(await app.evaluate(() => globalThis.updateConfirmations), 1)
+    assert.deepEqual(await app.evaluate(() => globalThis.updateLaunches), [])
+    await screenshot(page, 'feature-update-manual-fallback.png')
+    await button(panel, '打开发布页').click()
+    assert.deepEqual(await app.evaluate(() => globalThis.openedUrls), ['https://github.com/xjb1337/manju-workbench/releases'])
     console.log('更新夹具验收通过：无后台检查，暂无发布，发现新版本，纯文本说明，下载取消及校验，安装确认取消，未保存修改保护')
   } catch (error) {
     await desktop?.page.screenshot({ path: path.join(folder, 'diagnostic-update-failure.png'), timeout: 3000 }).catch(() => {})
@@ -741,6 +776,89 @@ async function verifyCreative(folder, parent, profile) {
   }
 }
 
+async function verifyLegacyUpgrade(folder) {
+  const { legacyFixture } = require('./legacy-fixture.cjs')
+  const parent = path.join(folder, '格式升级夹具')
+  await mkdir(parent)
+  const fixture = await legacyFixture(parent)
+  const { app, page } = await launch(path.join(folder, '格式升级 Electron Profile'))
+  try {
+    await choose(app, fixture.root)
+    await button(page.getByRole('banner'), '打开作品').click()
+    await page.locator('footer').getByText('格式 1', { exact: true }).waitFor()
+    await button(directory(page), '制作简报').click()
+    await page.getByLabel('主题').fill('虚构升级验收')
+    await button(page, '总规划提示词').click()
+    const dialog = page.getByRole('dialog', { name: '升级格式 1 作品' })
+    await dialog.getByText(/旧版无法打开升级后的格式 2/).waitFor()
+    await screenshot(page, 'feature-format-1-upgrade-confirmation.png')
+    await button(dialog, '取消').click()
+    await dialog.waitFor({ state: 'hidden' })
+    await page.locator('footer').getByText(/有未保存修改/).waitFor()
+    assert.equal(await page.getByRole('dialog').count(), 0)
+    assert.equal(await page.getByLabel('主题').inputValue(), '虚构升级验收')
+    assert.deepEqual(await readdir(parent), [path.basename(fixture.root)])
+    assert.deepEqual(await readFile(fixture.file), fixture.bytes)
+    await button(page, '总规划提示词').click()
+    await button(dialog, '保留原件并升级副本').click()
+    await page.getByRole('dialog', { name: '总规划提示词' }).waitFor()
+    const [copy] = (await readdir(parent)).filter(name => name !== path.basename(fixture.root))
+    const upgraded = await documentAt(path.join(parent, copy, 'project.json'))
+    assert.equal(upgraded.schemaVersion, 2)
+    assert.equal(upgraded.brief.theme, '虚构升级验收')
+    assert.deepEqual(await readFile(fixture.file), fixture.bytes)
+    for (const [index, name] of fixture.names.entries()) {
+      assert.deepEqual(await readFile(path.join(fixture.root, 'media', name)), fixture.mediaBytes[index])
+      assert.deepEqual(await readFile(path.join(parent, copy, 'media', name)), fixture.mediaBytes[index])
+    }
+    await button(page.getByRole('dialog', { name: '总规划提示词' }), '关闭').click()
+    await button(directory(page), '分镜').click()
+    const dialogue = page.getByLabel('本镜烧录台词', { exact: true })
+    await dialogue.fill('港口原台词')
+    await button(page, '保存镜头').click()
+    await footerSaved(page)
+    await page.getByRole('button', { name: /^配音与字幕稿/ }).last().click()
+    const voice = page.getByRole('dialog', { name: /配音与字幕稿/ })
+    const draftBody = '让灯塔指路。\n第二行 <示例> & {虚构}'
+    await voice.getByLabel('提示词正文').fill(draftBody)
+    assert.equal(await button(voice, '预览台词差异').isEnabled(), false)
+    await button(voice, '保存提示词').click()
+    await button(voice, '预览台词差异').click()
+    const diff = page.getByRole('dialog', { name: /应用配音稿 · 镜头 01 · 港口/ })
+    await diff.getByText('港口原台词', { exact: true }).waitFor()
+    assert.equal(await diff.getByLabel('拟应用台词').inputValue(), draftBody)
+    await screenshot(page, 'feature-voice-dialogue-diff.png')
+    assert.equal((await documentAt(path.join(parent, copy, 'project.json'))).episodes[0].shots[0].dialogue, '港口原台词')
+    await button(diff, '确认应用台词').click()
+    await diff.waitFor({ state: 'hidden' })
+    assert.equal(await dialogue.inputValue(), draftBody)
+    const srt = path.join(parent, '虚构字幕 验收.srt')
+    await choose(app, srt, 'saveChoices')
+    await button(stage(page), '导出 SRT').click()
+    await page.getByText(/字幕已导出/).waitFor()
+    assert.match(await readFile(srt, 'utf8'), /00:00:00,000 --> 00:00:07,500\n让灯塔指路。\n第二行 ＜示例＞ ＆ ｛虚构｝/)
+    await button(stage(page), '重新生成预览').waitFor()
+    await screenshot(page, 'feature-preview-rebuild.png')
+    await button(stage(page), '顺序预览').click()
+    await page.locator('video.episode-player').waitFor({ timeout: 45_000 })
+    await button(page, '关闭预览').click()
+    const before = (await readdir(tmpdir())).filter(name => name.startsWith('manju-shot-cache-'))
+    await button(stage(page), '重新生成预览').click()
+    await page.locator('video.episode-player').waitFor({ timeout: 45_000 })
+    await page.waitForFunction(() => document.querySelector('.episode-player')?.readyState >= 2)
+    const after = (await readdir(tmpdir())).filter(name => name.startsWith('manju-shot-cache-'))
+    assert.equal(before.length, after.length)
+    assert.equal(after.filter(name => !before.includes(name)).length, 1)
+    await button(page, '关闭预览').click()
+    return { original: fixture.root, upgraded: path.join(parent, copy), srt }
+  } catch (error) {
+    await page.screenshot({ path: path.join(folder, 'diagnostic-features-failure.png'), timeout: 3000 }).catch(() => {})
+    throw error
+  } finally {
+    await app.close()
+  }
+}
+
 async function main() {
   await mkdir(screenshots, { recursive: true })
   const verify = path.join(run, 'verification')
@@ -807,9 +925,11 @@ async function main() {
     for (const step of ['script', 'references', 'shots', 'image', 'video', 'audio', 'export']) await guideStatus(page, step, '待完成')
     await guideNext(page, 'script')
     await guide(page).getByText('缺作品剧本', { exact: true }).waitFor()
-    await screenshot(page, 'guide-01-empty-light.png')
+    assert.equal(await stage(page).locator('.empty-stage button.primary').textContent().then(text => text.trim()), '写／粘贴剧本')
+    await screenshot(page, 'feature-empty-project-light.png')
     await button(page, '切换深色').click()
-    await screenshot(page, 'guide-02-empty-dark.png')
+    await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark')
+    await screenshot(page, 'feature-empty-project-dark.png')
     await button(page, '切换浅色').click()
     const resize = (width, height) => app.evaluate(({ BrowserWindow }, dimensions) => {
       BrowserWindow.getAllWindows()[0].setSize(...dimensions)
@@ -818,18 +938,30 @@ async function main() {
     await page.waitForFunction(() => window.innerWidth <= 940)
     await guideNext(page, 'script')
     assert.ok(await guide(page).locator('.guide-steps').evaluate(steps => steps.scrollWidth === steps.clientWidth))
+    assert.ok(await stage(page).locator('.empty-stage').evaluate(empty => empty.scrollWidth === empty.clientWidth))
+    await button(directory(page), '制作简报').click()
+    assert.ok(await page.locator('#generation-video-url').evaluate(field => {
+      field.scrollIntoView({ block: 'start' })
+      const pane = field.closest('.brief-stage')
+      const label = field.closest('label').getBoundingClientRect()
+      const area = pane.getBoundingClientRect()
+      return pane.scrollTop > 0 && label.top >= area.top && label.bottom <= area.bottom && label.right <= area.right
+    }))
+    await button(directory(page), '分镜').click()
     await resize(1480, 970)
     await page.waitForFunction(() => window.innerWidth > 940)
     await selectStep(page, 'export')
     await guide(page).getByText('缺集数', { exact: true }).waitFor()
     assert.equal(await button(guide(page), '新建集数').isEnabled(), true)
-    await selectStep(page, 'script')
+    await button(stage(page), '写／粘贴剧本').click()
     await stage(page).getByRole('heading', { name: '剧本', exact: true }).waitFor()
-    await button(guide(page), '作品剧本').click()
+    await page.waitForFunction(() => document.activeElement?.id === 'script-text')
     await page.getByLabel('剧本', { exact: true }).fill('海港守夜人收到一封信。')
     await button(page, '保存').click()
     await footerSaved(page)
     await guideStatus(page, 'script', '已完成')
+    await button(directory(page), '分镜').click()
+    assert.equal(await stage(page).locator('.empty-stage button.primary').textContent().then(text => text.trim()), 'AI 生成分镜草案')
     await selectStep(page, 'references')
     await guide(page).getByText('缺角色参考', { exact: true }).waitFor()
     await button(guide(page), '角色参考').click()
@@ -847,7 +979,7 @@ async function main() {
     for (const [index, [title, seconds, dialogue, prompt, status]] of shotPlan.entries()) {
       await named(page, '新建镜头', title, '新建', index === 0 ? guide(page) : stage(page))
       await page.getByLabel('时长（秒）').fill(String(seconds))
-      await page.getByLabel('台词', { exact: true }).fill(dialogue)
+      await page.locator('#shot-dialogue').fill(dialogue)
       await page.getByLabel('提示词', { exact: true }).fill(prompt)
       await page.getByLabel('状态', { exact: true }).selectOption(status)
       await button(page, '保存镜头').click()
@@ -1062,7 +1194,7 @@ async function main() {
     assert.equal((await documentAt(projectFile)).episodes[1].exportRecord, undefined)
     await named(page, '新建镜头', '静默灯塔', '新建', guide(page))
     await page.getByLabel('时长（秒）').fill('1')
-    await page.getByLabel('台词', { exact: true }).fill('静默字幕')
+    await page.locator('#shot-dialogue').fill('静默字幕')
     await button(page, '保存镜头').click()
     await footerSaved(page)
     await selectStep(page, 'image')
@@ -1113,16 +1245,21 @@ async function main() {
     assert.ok((await readdir(project)).every(name => !name.startsWith('.manju-render-')))
     await app.close()
     const portrait = await verifyCreative(folder, parent, path.join(folder, '竖屏 Electron Profile'))
+    const legacy = await verifyLegacyUpgrade(folder)
     await verifyUpdates(folder, project)
     assert.deepEqual(await documentAt(projectFile), finalManifest)
     await writeFile(path.join(folder, 'acceptance.json'), JSON.stringify({
-      project, destination, portrait, sha256: sha, restartedElectron: true, replacementStillActive: track.versions[1].id,
+      project, destination, portrait, legacy, sha256: sha, restartedElectron: true, replacementStillActive: track.versions[1].id,
       dialogCanceledPreservedHash: true, renderCanceledPreservedHash: true, missingAssetPreservedHash: true,
       temporaryDirectoriesCleaned: true, guideEmptyPartialComplete: true, guideExternalStubAndClipboard: true,
       guidePerEpisodeAndStaleAfterRestart: true, skippedVideoAndAudioRetainCaptions: true,
       updateFixtureNoReleaseAndNewVersion: true, updateFixtureCanceledAndVerified: true,
       updateFixtureNativeConfirmationCanceledAndDirtyBlocked: true,
       magpieDraftCancellationErrorAndConflictReview: true,
+      legacyUpgradeCancellationPreservedSource: true, legacyUpgradeCopiedMedia: true,
+      voiceDialogueConfirmedAndSrtExported: true, previewRebuildReplacedSessionCache: true,
+      emptyProjectPrimaryActionChangedAfterScript: true, briefScrollLabelVisibleAtMinimumSize: true,
+      gatewayModelListAndHtmlDistinguished: true, manualUpdateFallbackDidNotLaunchSetup: true,
     }, null, 2))
     await writeFile(path.join(verify, 'latest-success.txt'), folder + '\n')
     console.log('已有 MP4 保留，取消对话框 / 编码中取消 / 第四镜缺源三条路径 SHA-256 一致：', sha)

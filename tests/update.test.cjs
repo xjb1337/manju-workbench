@@ -4,19 +4,22 @@ const { tmpdir } = require('node:os')
 const path = require('node:path')
 const { test } = require('node:test')
 const { Updater } = require('../dist/main/updater')
-const { resolveUpdateKind } = require('../dist/main/update-system')
+const { resolveUpdateTarget, setupLaunchOptions } = require('../dist/main/update-system')
 const { releasesPath, notes, futureVersion, sha256, executableFixture, releaseFixture, loopbackRequest, atUrl, startUpdateFixture } = require('./update-fixture.cjs')
 
 const version = require('../package.json').version
+const setupTarget = {
+  kind: 'setup', directory: 'D:\\工具 与 漫剧\\安装 目录', identity: 'local.manju.workbench',
+}
 const zip = Buffer.from('UEsDBBQAAAAAAOCDcl3uQOUFBwAAAAcAAAALAAAAZXhhbXBsZS50eHRmaXh0dXJlUEsBAhQDFAAAAAAA4INyXe5A5QUHAAAABwAAAAsAAAAAAAAAAAAAAIABAAAAAGV4YW1wbGUudHh0UEsFBgAAAAABAAEAOQAAADAAAAAAAA==', 'base64')
 
-async function service(t, { fixture = releaseFixture(), releases = [fixture.release], kind = 'setup', request } = {}) {
+async function service(t, { fixture = releaseFixture(), releases = [fixture.release], kind = 'setup', target = async () => kind === 'setup' ? setupTarget : { kind }, request } = {}) {
   const temp = await mkdtemp(path.join(tmpdir(), 'manju-update-test-'))
   t.after(() => rm(temp, { recursive: true, force: true }))
   const urls = []
   const launched = []
   const updater = new Updater({
-    version, temp, kind: async () => kind, launch: async file => { launched.push(file) },
+    version, temp, target, launch: async (file, target) => { launched.push({ file, target }) },
     request: async (url, init) => {
       urls.push(url.href)
       assert.equal(init.redirect, 'manual')
@@ -59,7 +62,7 @@ test('按数字比较版本，忽略 draft 和 prerelease 并显示正式发布�
   assert.equal((await empty.updater.check()).status, 'none')
   const { updater } = await service(t, { releases: [...ignored, first.release, highest.release] })
   assert.deepEqual(await updater.check(), {
-    currentVersion: version, status: 'available', version: highestVersion, notes, kind: 'setup', unavailable: undefined,
+    currentVersion: version, status: 'available', version: highestVersion, notes, kind: 'setup', unavailable: undefined, directory: setupTarget.directory,
   })
 })
 
@@ -193,8 +196,11 @@ test('GitHub 官方 CDN 重定向通过，明确确认后才启动本地绝对�
   assert.deepEqual(launched, [])
   const [directory] = await readdir(temp)
   assert.deepEqual(await readdir(path.join(temp, directory)), [fixture.fileName])
-  assert.equal(await updater.install(async () => true), true)
-  assert.deepEqual(launched, [path.join(temp, directory, fixture.fileName)])
+  assert.equal(await updater.install(async target => {
+    assert.equal(target, setupTarget.directory)
+    return true
+  }), true)
+  assert.deepEqual(launched, [{ file: path.join(temp, directory, fixture.fileName), target: setupTarget }])
 })
 
 test('安装确认后重新校验，下载后的篡改阻止执行', async t => {
@@ -230,25 +236,77 @@ test('便携 EXE 和 ZIP 均可校验和打开目录，均不可启动安装器'
   }
 })
 
-test('resolveUpdateKind 支持自定义安装目录识别并区分便携版与未打包目录', async t => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'manju-kind-test-'))
-  t.after(() => rm(dir, { recursive: true, force: true }))
-  const customDir = path.join(dir, 'Custom Folder')
-  const unpackedDir = path.join(dir, 'win-unpacked')
-  const { mkdir } = require('node:fs/promises')
-  await mkdir(customDir, { recursive: true })
-  await mkdir(unpackedDir, { recursive: true })
-  const customExe = path.join(customDir, '漫剧工作台.exe')
-  const unpackedExe = path.join(unpackedDir, '漫剧工作台.exe')
-  await writeFile(customExe, 'exe')
-  await writeFile(path.join(customDir, 'Uninstall.exe'), 'uninstaller')
-  await writeFile(unpackedExe, 'exe')
+function windowsInstall(directory, { registered = directory, identity = '', portable = false, installed = true, canonicalDir = directory } = {}) {
+  const exe = candidate => path.win32.join(candidate, '漫剧工作台.exe')
+  const uninstall = candidate => path.win32.join(candidate, 'Uninstall.exe')
+  let registry = registered ? {
+    directory: registered, identity, displayIcon: exe(registered), uninstallString: `"${uninstall(registered)}"`,
+  } : null
+  const files = new Set([exe(canonicalDir), ...(installed ? [uninstall(canonicalDir)] : [])])
+  const actual = {
+    platform: 'win32', arch: 'x64', packaged: true, exePath: exe(directory),
+    env: portable ? { PORTABLE_EXECUTABLE_DIR: directory } : {},
+  }
+  const inspect = {
+    canonical: async file => file === actual.exePath ? exe(canonicalDir) : file,
+    isFile: async file => files.has(file),
+    registry: async () => registry,
+  }
+  return { actual, inspect, files, setRegistry: value => { registry = value } }
+}
 
-  assert.equal(await resolveUpdateKind({ platform: 'linux', arch: 'x64', packaged: true, exePath: customExe, env: {} }), null)
-  assert.equal(await resolveUpdateKind({ platform: 'win32', arch: 'x64', packaged: false, exePath: customExe, env: {} }), null)
-  assert.equal(await resolveUpdateKind({
-    platform: 'win32', arch: 'x64', packaged: true, exePath: customExe, env: { PORTABLE_EXECUTABLE_FILE: 'C:\\Portable.exe' },
-  }), 'portable')
-  assert.equal(await resolveUpdateKind({ platform: 'win32', arch: 'x64', packaged: true, exePath: unpackedExe, env: {} }), 'portable')
-  assert.equal(await resolveUpdateKind({ platform: 'win32', arch: 'x64', packaged: true, exePath: customExe, env: {} }), 'setup')
+test('Windows Setup：默认路径和中文空格目录绑定到正在运行的安装实例', async () => {
+  for (const directory of ['C:\\Users\\User\\AppData\\Local\\Programs\\Manju Workbench', setupTarget.directory]) {
+    for (const identity of ['', setupTarget.identity]) {
+      const fixture = windowsInstall(directory, { identity })
+      const target = await resolveUpdateTarget(fixture.actual, fixture.inspect)
+      assert.deepEqual(target, { ...setupTarget, directory })
+      const installer = 'C:\\Users\\User\\更新 缓存\\Manju-Workbench-' + futureVersion + '-x64-Setup.exe'
+      const launch = setupLaunchOptions(installer, target)
+      assert.deepEqual(launch.args, ['/MANJUUPDATE=local.manju.workbench', `/MANJUDIR="${directory}"`])
+      assert.equal(launch.options.argv0, `"${installer}"`)
+      assert.equal(launch.options.windowsVerbatimArguments, true)
+      assert.equal(launch.options.shell, false)
+      assert.equal(launch.options.cwd, path.win32.dirname(installer))
+    }
+  }
+})
+
+test('Windows Setup：注册表错位、缺失、身份不符或路径别名进入手动更新，便携模式隔离', async () => {
+  const directory = setupTarget.directory
+  for (const options of [
+    { registered: 'C:\\Other Install' }, { registered: null }, { identity: 'different.install' },
+    { canonicalDir: 'D:\\Real Install' }, { installed: false },
+  ]) {
+    const { actual, inspect } = windowsInstall(directory, options)
+    assert.deepEqual(await resolveUpdateTarget(actual, inspect), { kind: 'manual' })
+  }
+  for (const options of [{ portable: true }, { registered: null, installed: false }]) {
+    const { actual, inspect } = windowsInstall(directory, options)
+    assert.deepEqual(await resolveUpdateTarget(actual, inspect), { kind: 'portable' })
+  }
+  const { actual, inspect } = windowsInstall(directory)
+  assert.deepEqual(await resolveUpdateTarget({ ...actual, platform: 'linux' }, inspect), { kind: null })
+  assert.deepEqual(await resolveUpdateTarget({ ...actual, packaged: false }, inspect), { kind: null })
+  assert.throws(() => setupLaunchOptions('C:\\Updates\\Setup.exe', { ...setupTarget, directory: directory + '"' }), /手动更新/)
+})
+
+test('已下载的 Setup 在确认期间注册表变更时停止启动并切换手动更新', async t => {
+  const fixture = windowsInstall(setupTarget.directory)
+  const target = () => resolveUpdateTarget(fixture.actual, fixture.inspect)
+  const { updater, launched, temp } = await service(t, { target })
+  assert.equal((await updater.check()).directory, setupTarget.directory)
+  await updater.download(() => {})
+  await assert.rejects(updater.install(async directory => {
+    assert.equal(directory, setupTarget.directory)
+    fixture.setRegistry(null)
+    return true
+  }), /手动更新/)
+  assert.deepEqual(launched, [])
+  assert.deepEqual(await readdir(temp), [])
+  const manual = await updater.check()
+  assert.equal(manual.manual, true)
+  assert.equal(manual.kind, null)
+  assert.match(manual.unavailable, /手动更新/)
+  assert.throws(() => updater.download(() => {}), /没有可下载/)
 })

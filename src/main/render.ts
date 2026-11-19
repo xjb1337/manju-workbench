@@ -1,5 +1,6 @@
-import { createHash, randomUUID } from 'node:crypto'
-import { copyFile, link, lstat, mkdtemp, open, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
+import { copyFile, link, lstat, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { availableParallelism, tmpdir } from 'node:os'
 import path from 'node:path'
 import { shotMedia, shotVisual, folderNameSchema, totalFrames, type Episode, type Shot } from '../shared/model'
@@ -12,13 +13,17 @@ const fps = 30
 const sampleRate = 48_000
 const cjkUnit = 100
 const asciiUnit = 55
-const shotCacheVersion = 'shot-cache-v1'
+const shotCacheVersion = 'shot-cache-v3'
+
+function captionLines(value: string) {
+  // Use visible equivalents for ASS and SRT delimiters. SRT readers differ in whether they decode entities.
+  const punctuation: Record<string, string> = { '\\': '＼', '{': '｛', '}': '｝', '<': '＜', '>': '＞', '&': '＆' }
+  return value.trim().replace(/[\\{}<>&]/g, char => punctuation[char])
+    .replace(/[\x00-\x09\x0b\x0c\x0e-\x1f]/g, '').split(/\r\n|\r|\n/)
+}
 
 export function subtitleText(value: string) {
-  // ASS override delimiters and backslash escapes are reserved markup.
-  const punctuation: Record<string, string> = { '\\': '＼', '{': '｛', '}': '｝' }
-  return value.trim().replace(/[\\{}]/g, char => punctuation[char])
-    .replace(/[\x00-\x09\x0b\x0c\x0e-\x1f]/g, '').replace(/\r\n|\r|\n/g, '\\N')
+  return captionLines(value).join('\\N')
 }
 
 function assTime(frames: number) {
@@ -116,19 +121,45 @@ function wrapLine(line: string, maxUnits: number) {
   return wrapped
 }
 
-export function subtitles(shot: Shot, { width, height, subtitle }: FrameSpec) {
+export function subtitleCues(shot: Pick<Shot, 'frames' | 'dialogue'>, { width, subtitle }: FrameSpec) {
+  const input = captionLines(shot.dialogue)
+  if (!input.some(line => line.trim())) return []
   const maxColumns = Math.floor((width - subtitle.horizontal * 2) / (subtitle.size * 1.15))
   const maxUnits = Math.max(cjkUnit, maxColumns * cjkUnit)
-  const lines = subtitleText(shot.dialogue).split('\\N').flatMap(line => wrapLine(line, maxUnits))
+  const lines = input.flatMap(line => wrapLine(line, maxUnits))
   const linesPerPage = 4
   const pages = Math.ceil(lines.length / linesPerPage)
   if (pages > shot.frames) throw new Error('镜头时长不足以显示全部字幕，请缩短台词或延长镜头')
-  const events = Array.from({ length: pages }, (_, index) => {
-    const start = Math.floor(index * shot.frames / pages)
-    const end = Math.floor((index + 1) * shot.frames / pages)
-    const text = lines.slice(index * linesPerPage, (index + 1) * linesPerPage).join('\\N')
-    return `Dialogue: 0,${assTime(start)},${assTime(end)},Chinese,,0,0,0,,${text}`
-  }).join('\n')
+  return Array.from({ length: pages }, (_, index) => ({
+    start: Math.floor(index * shot.frames / pages),
+    end: Math.floor((index + 1) * shot.frames / pages),
+    lines: lines.slice(index * linesPerPage, (index + 1) * linesPerPage),
+  }))
+}
+
+function srtTime(frames: number) {
+  const ms = Math.floor(frames * 1000 / fps)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${pad(Math.floor(ms / 3_600_000))}:${pad(Math.floor(ms / 60_000) % 60)}:${pad(Math.floor(ms / 1000) % 60)},${String(ms % 1000).padStart(3, '0')}`
+}
+
+export function episodeSrt(episode: Pick<Episode, 'shots'>, spec: FrameSpec) {
+  let offset = 0
+  let index = 0
+  const blocks: string[] = []
+  for (const shot of episode.shots) {
+    for (const { start, end, lines } of subtitleCues(shot, spec)) {
+      blocks.push(`${++index}\n${srtTime(offset + start)} --> ${srtTime(offset + end)}\n${lines.map(line => line.trim() ? line : '\u00a0').join('\n')}\n`)
+    }
+    offset += shot.frames
+  }
+  return blocks.join('\n')
+}
+
+export function subtitles(shot: Shot, spec: FrameSpec) {
+  const { width, height, subtitle } = spec
+  const events = subtitleCues(shot, spec).map(({ start, end, lines }) =>
+    `Dialogue: 0,${assTime(start)},${assTime(end)},Chinese,,0,0,0,,${lines.join('\\N')}`).join('\n')
   const font = process.platform === 'win32' ? 'Microsoft YaHei' : 'Noto Sans CJK SC'
   return `[Script Info]
 ScriptType: v4.00+
@@ -171,8 +202,6 @@ type ShotInputs = {
   embeddedAudio: boolean
   visualPath?: string
   voicePath?: string
-  visualMeta?: { size: number; mtimeMs: number }
-  voiceMeta?: { size: number; mtimeMs: number }
 }
 
 /** Resolves shot media tracks, validates source files on disk, and probes legacy video audio once. */
@@ -181,20 +210,8 @@ async function resolveShotInputs(store: ProjectStore, project: Project, shot: Sh
   const visual = shotVisual(shot, method)
   const video = visual?.kind === 'video' ? visual.version : undefined
   const voice = shotMedia(shot, 'audio', method)
-  let visualPath: string | undefined
-  let visualMeta: { size: number; mtimeMs: number } | undefined
-  let voicePath: string | undefined
-  let voiceMeta: { size: number; mtimeMs: number } | undefined
-  if (visual) {
-    visualPath = await store.assetPath(visual.version)
-    const stats = await checkedFile(visualPath)
-    visualMeta = { size: stats.size, mtimeMs: stats.mtimeMs }
-  }
-  if (voice) {
-    voicePath = await store.assetPath(voice)
-    const stats = await checkedFile(voicePath)
-    voiceMeta = { size: stats.size, mtimeMs: stats.mtimeMs }
-  }
+  const visualPath = visual && await store.assetPath(visual.version)
+  const voicePath = voice && await store.assetPath(voice)
   let embeddedAudio = false
   // Probe earlier manifests that predate the embedded-audio marker.
   if (!voice && !shot.omittedMedia?.audio && video && usesFinishedVideo(method)) {
@@ -204,12 +221,14 @@ async function resolveShotInputs(store: ProjectStore, project: Project, shot: Sh
       embeddedAudio = (await probe(visualPath!, video.extension, signal)).streams.some(stream => stream.codec_type === 'audio')
     }
   }
-  return { method, visual, voice, embeddedAudio, visualPath, voicePath, visualMeta, voiceMeta }
+  return { method, visual, voice, embeddedAudio, visualPath, voicePath }
 }
 
 /** Computes a deterministic SHA-256 key covering all inputs that affect a shot's rendered output. */
-function shotCacheKey(spec: FrameSpec, shot: Shot, inputs: ShotInputs) {
-  const { method, visual, voice, embeddedAudio, visualMeta, voiceMeta } = inputs
+async function shotCacheKey(spec: FrameSpec, shot: Shot, inputs: ShotInputs, signal: AbortSignal) {
+  const { method, visual, voice, embeddedAudio, visualPath, voicePath } = inputs
+  const visualHash = visualPath && await fileFingerprint(visualPath, signal)
+  const voiceHash = voicePath && await fileFingerprint(voicePath, signal)
   return createHash('sha256').update(JSON.stringify({
     version: shotCacheVersion,
     spec: {
@@ -229,26 +248,22 @@ function shotCacheKey(spec: FrameSpec, shot: Shot, inputs: ShotInputs) {
       kind: visual.kind,
       id: visual.version.id,
       extension: visual.version.extension,
-      size: visualMeta?.size,
-      mtimeMs: visualMeta?.mtimeMs,
+      hash: visualHash,
     } : null,
     voice: voice ? {
       id: voice.id,
       extension: voice.extension,
-      size: voiceMeta?.size,
-      mtimeMs: voiceMeta?.mtimeMs,
+      hash: voiceHash,
     } : null,
     embeddedAudio,
   })).digest('hex')
 }
 
-async function isValidCachedFile(file: string) {
-  try {
-    const stat = await lstat(file)
-    return stat.isFile() && stat.size > 0
-  } catch {
-    return false
-  }
+async function fileFingerprint(file: string, signal: AbortSignal) {
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(file, { signal })) hash.update(chunk)
+  signal.throwIfAborted()
+  return hash.digest('hex')
 }
 
 async function linkOrCopy(source: string, target: string) {
@@ -259,29 +274,34 @@ async function linkOrCopy(source: string, target: string) {
   }
 }
 
-async function tryUseShotCache(cachedFile: string, workFile: string) {
-  if (!await isValidCachedFile(cachedFile)) return false
+async function tryUseShotCache(entry: string, workFile: string, signal: AbortSignal) {
   try {
-    await linkOrCopy(cachedFile, workFile)
-    return true
+    const expected = await readFile(path.join(entry, 'sha256'), 'utf8')
+    if (!/^[a-f0-9]{64}$/.test(expected)) throw new Error('缓存校验值无效')
+    await linkOrCopy(path.join(entry, 'fragment.mov'), workFile)
+    if (await fileFingerprint(workFile, signal) === expected) return true
   } catch {
-    await rm(workFile, { force: true }).catch(() => {})
-    return false
+    signal.throwIfAborted()
   }
+  await rm(workFile, { force: true }).catch(() => {})
+  await rm(entry, { recursive: true, force: true }).catch(() => {})
+  return false
 }
 
 async function writeShotCache(workFile: string, cacheDir: string, hash: string, signal: AbortSignal) {
-  if (signal.aborted) return
-  const cachedFile = path.join(cacheDir, `${hash}.mov`)
-  if (await isValidCachedFile(cachedFile)) return
-  const temp = path.join(cacheDir, `.${hash}.${randomUUID()}.tmp`)
+  let staging: string | undefined
   try {
-    await linkOrCopy(workFile, temp)
-    await renameWithRetry(temp, cachedFile)
+    const digest = await fileFingerprint(workFile, signal)
+    staging = await mkdtemp(path.join(cacheDir, '.fragment-'))
+    await linkOrCopy(workFile, path.join(staging, 'fragment.mov'))
+    await writeFile(path.join(staging, 'sha256'), digest, 'utf8')
+    signal.throwIfAborted()
+    // Publish the fragment and its checksum together. An identical concurrent shot can win the rename.
+    await renameWithRetry(staging, path.join(cacheDir, hash))
   } catch {
     // Cache writes are best-effort and must not fail the main render.
   } finally {
-    await rm(temp, { force: true }).catch(() => {})
+    if (staging) await rm(staging, { recursive: true, force: true }).catch(() => {})
   }
 }
 
@@ -305,7 +325,7 @@ async function encodeShot(
   const audioArgs = embeddedAudio ? [] : voice && voicePath ? mediaInput(voicePath, voice.extension)
     : ['-f', 'lavfi', '-i', `anullsrc=r=${sampleRate}:cl=mono`]
   const captionFile = `caption-${index}.ass`
-  const caption = subtitleText(shot.dialogue)
+  const caption = !!shot.dialogue.trim()
   if (caption) await writeFile(path.join(cwd, captionFile), subtitles(shot, spec), 'utf8')
   const videoFilter = [
     'setpts=PTS-STARTPTS',
@@ -340,8 +360,8 @@ async function encodeShot(
   })
 }
 
-export async function exportDestination(requested: string, projectRoot: string) {
-  if (path.extname(requested).toLowerCase() !== '.mp4') throw new Error('导出文件名必须以 .mp4 结尾')
+export async function exportDestination(requested: string, projectRoot: string, extension: '.mp4' | '.srt' = '.mp4') {
+  if (path.extname(requested).toLowerCase() !== extension) throw new Error(`导出文件名必须以 ${extension} 结尾`)
   const basename = path.basename(requested)
   const name = folderNameSchema.parse(basename)
   if (name !== basename) throw new Error('导出文件名首尾不能包含空白字符')
@@ -356,6 +376,19 @@ export async function exportDestination(requested: string, projectRoot: string) 
   })
   if (existing && !existing.isFile()) throw new Error('导出目标必须是普通文件')
   return target
+}
+
+export async function writeEpisodeSrt(destination: string, episode: Episode, spec: FrameSpec) {
+  const srt = episodeSrt(episode, spec)
+  if (!srt) throw new Error('本集没有可导出的字幕')
+  const staging = await mkdtemp(path.join(path.dirname(destination), '.manju-render-'))
+  try {
+    const file = path.join(staging, 'captions.srt')
+    await writeFile(file, srt, { encoding: 'utf8', flush: true })
+    await renameWithRetry(file, destination)
+  } finally {
+    await rm(staging, { recursive: true, force: true }).catch(() => {})
+  }
 }
 
 export async function renderEpisode(
@@ -389,6 +422,7 @@ export async function renderEpisode(
         options.progress(percent)
       }
     }
+    const shotCacheFills = new Map<string, Promise<void>>()
     let next = 0
     let firstError: Error | undefined
     const worker = async () => {
@@ -399,17 +433,30 @@ export async function renderEpisode(
         try {
           batchSignal.throwIfAborted()
           const inputs = await resolveShotInputs(store, project, shot, batchSignal)
-          const hash = options.cacheDir ? shotCacheKey(spec, shot, inputs) : undefined
+          const cacheDir = options.cacheDir
+          const hash = cacheDir && await shotCacheKey(spec, shot, inputs, batchSignal)
           const workFile = path.join(workDir!, files[i])
-          const hit = hash ? await tryUseShotCache(path.join(options.cacheDir!, `${hash}.mov`), workFile) : false
-          if (hit) {
-            batchSignal.throwIfAborted()
+          const encode = () => encodeShot(store, shot, i, files[i], workDir!, spec, inputs, batchSignal, ratio => {
+            shotProgress[i] = Math.max(shotProgress[i], ratio)
+            reportProgress()
+          })
+          if (cacheDir && hash) {
+            while (shotCacheFills.has(hash)) await shotCacheFills.get(hash)
+            const useOrFill = async () => {
+              if (await tryUseShotCache(path.join(cacheDir, hash), workFile, batchSignal)) return
+              await encode()
+              const afterEncode = await shotCacheKey(spec, shot, inputs, batchSignal).catch(() => undefined)
+              if (afterEncode === hash) await writeShotCache(workFile, cacheDir, hash, batchSignal)
+            }
+            const fill = useOrFill()
+            shotCacheFills.set(hash, fill)
+            try {
+              await fill
+            } finally {
+              if (shotCacheFills.get(hash) === fill) shotCacheFills.delete(hash)
+            }
           } else {
-            await encodeShot(store, shot, i, files[i], workDir!, spec, inputs, batchSignal, ratio => {
-              shotProgress[i] = Math.max(shotProgress[i], ratio)
-              reportProgress()
-            })
-            if (hash) await writeShotCache(workFile, options.cacheDir!, hash, batchSignal)
+            await encode()
           }
           shotProgress[i] = 1
           reportProgress()

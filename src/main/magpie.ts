@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { detailTextSchema } from '../shared/creative'
-import { aiBaseUrlSchema, magpieBaseUrl, type AiConnectionTestResult } from '../shared/plan'
+import { aiBaseUrlSchema, magpieBaseUrl, magpieModelSchema, type AiConnectionTestResult } from '../shared/plan'
 import { parseMagpieDraft } from './plan-import'
 
 const maxCompletionBytes = 4 * 1024 * 1024
@@ -14,7 +14,7 @@ const completionSchema = z.object({
 })
 
 const modelsSchema = z.object({
-  data: z.array(z.object({ id: z.string().min(1) })).optional(),
+  data: z.array(z.object({ id: magpieModelSchema })),
 })
 
 async function readJsonResponse(response: Response, maxBytes: number, gatewayName: string) {
@@ -154,35 +154,40 @@ export async function generateAiTextDraft(model: string, prompt: string, signal:
   return detailTextSchema.parse(cleaned)
 }
 
-export async function testAiGateway(baseUrlInput: string, model: string, signal: AbortSignal): Promise<AiConnectionTestResult> {
+export async function testAiGateway(baseUrlInput: string, signal: AbortSignal): Promise<AiConnectionTestResult> {
   const baseUrl = aiBaseUrlSchema.parse(baseUrlInput)
   const name = gatewayLabel(baseUrl)
   const started = Date.now()
   const timeout = AbortSignal.timeout(8_000)
   const requestSignal = AbortSignal.any([signal, timeout])
+  let response: Response
   try {
-    const headers: Record<string, string> = baseUrl === magpieBaseUrl ? { Authorization: 'Bearer magpie' } : {}
-    const response = await fetch(`${baseUrl}/models`, {
+    response = await fetch(`${baseUrl}/models`, {
       method: 'GET',
-      redirect: 'error',
+      redirect: 'manual',
       signal: requestSignal,
-      headers,
+      headers: baseUrl === magpieBaseUrl ? { Authorization: 'Bearer magpie' } : {},
     })
-    if (response.ok) {
-      const parsed = modelsSchema.safeParse(await readJsonResponse(response, maxModelsBytes, name).catch(() => ({})))
-      const models = [...new Set((parsed.success ? parsed.data.data ?? [] : []).map(item => item.id).filter(Boolean))].slice(0, 100)
-      return { models, latencyMs: Math.max(1, Date.now() - started) }
-    }
-    await response.body?.cancel().catch(() => {})
-    if (response.status !== 404 && response.status !== 405) {
-      throw mapHttpFailure(response.status, baseUrl)
-    }
-    // Some local proxies only implement /chat/completions without /models.
-    await requestChatCompletion({ baseUrl, model, prompt: 'ping', signal, timeoutMs: 12_000 })
-    return { models: [], latencyMs: Math.max(1, Date.now() - started), probedByCompletion: true }
   } catch (error) {
+    signal.throwIfAborted()
     if (timeout.aborted) throw new Error(`${name} 连接超时，请确认服务已开启`)
     if (error instanceof TypeError) throw new Error(unreachableMessage(baseUrl))
     throw error
   }
+  const latencyMs = Math.max(1, Date.now() - started)
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {})
+    return { models: [], latencyMs, modelList: 'unavailable', issue: `/models 返回 HTTP ${response.status}` }
+  }
+  if (response.headers.get('content-type')?.toLowerCase().includes('text/html')) {
+    await response.body?.cancel().catch(() => {})
+    return { models: [], latencyMs, modelList: 'invalid', issue: `/models 返回 HTTP ${response.status} HTML` }
+  }
+  const parsed = modelsSchema.safeParse(await readJsonResponse(response, maxModelsBytes, name).catch(() => undefined))
+  signal.throwIfAborted()
+  if (!parsed.success) {
+    return { models: [], latencyMs, modelList: 'invalid', issue: `/models 返回 HTTP ${response.status}，数据格式无效` }
+  }
+  const models = [...new Set(parsed.data.data.map(item => item.id))].slice(0, 100)
+  return { models, latencyMs, modelList: 'valid' }
 }

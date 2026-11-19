@@ -69,7 +69,12 @@ export function Inspector({
         </div>
         {canUseFinishedDuration && <button type="button" className="small subtle accent use-clip-duration"
           onClick={() => setDraft({ ...draft, seconds: String(Number((finishedFrames / 30).toFixed(3))) })}>使用成片时长</button>}
-        <label className="field">台词<textarea id="shot-dialogue" rows={2} maxLength={1000} value={draft.dialogue} onChange={event => setDraft({ ...draft, dialogue: event.target.value })} /></label>
+        <div className="field">
+          <label htmlFor="shot-dialogue">{draft.dialogue === dialogue ? '本镜烧录台词' : '台词草稿'}</label>
+          <textarea id="shot-dialogue" rows={2} maxLength={1000} value={draft.dialogue}
+            onChange={event => setDraft({ ...draft, dialogue: event.target.value })} />
+        </div>
+        {draft.dialogue !== dialogue && <div className="caption-saved"><span>本镜烧录台词</span><p>{dialogue || '（空）'}</p></div>}
         {usesTrack(method, 'image') && <div className="prompt-field"><div className="field-header"><label htmlFor="shot-prompt">提示词</label>
           {shot.legacyPromptReview?.image && <Badge value="需更新" />}
           <button type="button" className="small subtle accent" disabled={!promptToCopy.trim()} onClick={() => onCopy(promptToCopy)}>

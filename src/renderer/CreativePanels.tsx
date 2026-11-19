@@ -1,29 +1,30 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
-import { ArrowSquareOut, Copy, FloppyDisk, Sparkle } from '@phosphor-icons/react'
+import { ArrowSquareOut, Copy, FileText, FloppyDisk, Sparkle } from '@phosphor-icons/react'
 import {
   defaultMethod, detailLabels, frameSpec, generationKindSchema, generationLabels, generationPresets, generationToolUrl,
   methodLabels, ratioSchema, workTypeLabels, workTypeSchema,
   type Brief, type DetailKind, type GenerationKind, type GenerationTool, type Ratio, type WorkType,
 } from '../shared/creative'
-import type { Episode, Mutation, Project, Shot } from '../shared/model'
+import { shotDialogueSchema, type Episode, type Mutation, type Project, type Shot } from '../shared/model'
 import {
   aiInstructionSchema, magpieModelSchema, magpieScriptSchema, maxPlanCharacters, type AiGatewayConfig, type PlanPreview,
 } from '../shared/plan'
-import { briefFields, missingBrief, planningPrompt, shotPromptBody, shotPromptContext, shotPromptText } from '../shared/prompts'
+import { briefFields, missingBrief, planningPrompt, shotPromptBody, shotPromptContext, shotPromptText, voiceDialoguePreview } from '../shared/prompts'
 import { aiGatewaySummary } from './AiPanels'
-import { Badge, Modal } from './components'
+import { Badge, Modal, sequence } from './components'
 
 type Failure = (message: string) => void
 type CopyText = (text: string, failure: Failure) => Promise<boolean>
 type BriefChange = Extract<Mutation, { type: 'project.brief' }>
 type DetailAction = Extract<Mutation, { type: 'shot.detail' }>['action']
+type VoiceChange = Pick<Extract<Mutation, { type: 'shot.apply-voice' }>, 'before' | 'voiceBody' | 'dialogue'>
 const briefTextFields = ['theme', 'audience', 'style', 'language', 'tools', 'terms'] as const
 const generationKinds = generationKindSchema.options
 const emptyTool: GenerationTool = { name: '', url: '' }
 
-export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, onImport, onMagpie }: {
+export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, onImport, hasScript, onWriteScript, onMagpie }: {
   project: Project; episode?: Episode; busy: boolean; onDirty: (dirty: boolean) => void
-  onSave: (change: BriefChange) => Promise<boolean> | void; onPlan: () => void; onImport: () => void; onMagpie: () => void
+  onSave: (change: BriefChange) => Promise<boolean> | void; onPlan: () => void; onImport: () => void; hasScript: boolean; onWriteScript: () => void; onMagpie: () => void
 }) {
   function fields() {
     return {
@@ -79,7 +80,7 @@ export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, on
     if (dirty && !(await commitBrief())) return
     openDialog()
   }
-  return <main className="stage wide">
+  return <main className="stage wide brief-stage">
     <div className="stage-heading"><h2>制作简报</h2></div>
     <div className="brief-layout">
       <form className="brief-form" onSubmit={save}>
@@ -140,7 +141,10 @@ export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, on
           <ul>{(missing.length ? missing : ['无']).map(item => <li key={item}>{item}</li>)}</ul>
         </div>
         <div className="plan-buttons">
-          <button type="button" className="primary" disabled={busy} onClick={() => void saveThenOpen(onMagpie)}><Sparkle size={16} /> AI 生成分镜草案</button>
+          {hasScript
+            ? <button type="button" className="primary" disabled={busy} onClick={() => void saveThenOpen(onMagpie)}><Sparkle size={16} /> AI 生成分镜草案</button>
+            : <button type="button" className="primary" disabled={busy} onClick={onWriteScript}><FileText size={16} /> 写／粘贴剧本</button>}
+          {!hasScript && <button type="button" disabled={busy} onClick={() => void saveThenOpen(onMagpie)}>粘贴剧本</button>}
           <button type="button" disabled={busy} onClick={() => void saveThenOpen(onPlan)}>总规划提示词</button>
           <button type="button" disabled={busy} onClick={() => void saveThenOpen(onImport)}>导入外部规划</button>
         </div>
@@ -295,7 +299,7 @@ export function PlanImportDialog({
 }
 
 export function DetailDialog({
-  project, episode, shot, kind, busy, aiConfig, onOpenAiSettings, onOptimize, onCancelOptimize, onDirty, copy, save, close,
+  project, episode, shot, kind, busy, aiConfig, onOpenAiSettings, onOptimize, onCancelOptimize, onDirty, copy, save, onApplyVoice, close,
 }: {
   project: Project; episode: Episode; shot: Shot; kind: DetailKind; busy: boolean; aiConfig: AiGatewayConfig
   onOpenAiSettings: () => void
@@ -303,6 +307,7 @@ export function DetailDialog({
   onCancelOptimize: (failure: Failure) => void
   onDirty: (dirty: boolean) => void; copy: CopyText
   save: (action: DetailAction, failure: Failure) => Promise<boolean>; close: () => void
+  onApplyVoice?: (change: VoiceChange, failure: Failure) => Promise<boolean>
 }) {
   const stored = shot.details?.[kind]
   const spec = frameSpec(project)
@@ -312,6 +317,7 @@ export function DetailDialog({
   const [body, setBody] = useState(baseline)
   const [instruction, setInstruction] = useState('')
   const [aiDraft, setAiDraft] = useState<string | null>(null)
+  const [voicePreview, setVoicePreview] = useState<VoiceChange | null>(null)
   const [optimizing, setOptimizing] = useState(false)
   const [confirm, setConfirm] = useState<'regenerate' | 'discard' | null>(null)
   const [error, setError] = useState('')
@@ -324,7 +330,10 @@ export function DetailDialog({
       if (optimizing) onCancelOptimize(setError)
       return
     }
-    if (confirm) setConfirm(null)
+    if (voicePreview) {
+      setVoicePreview(null)
+      setError('')
+    } else if (confirm) setConfirm(null)
     else if (changed) setConfirm('discard')
     else close()
   }
@@ -346,6 +355,33 @@ export function DetailDialog({
       setOptimizing(false)
       setError(message)
     })
+  }
+  const shotNumber = sequence(episode.shots.findIndex(item => item.id === shot.id))
+  if (voicePreview && onApplyVoice) {
+    const valid = shotDialogueSchema.safeParse(voicePreview.dialogue)
+    const canApply = valid.success && !!voicePreview.dialogue.trim() && voicePreview.dialogue !== voicePreview.before
+    return <Modal title={`应用配音稿 · 镜头 ${shotNumber} · ${shot.title}`} onClose={askClose}>
+      <div className="creative-dialog">
+        <p className="caption-episode">{episode.title}</p>
+        <div className="diff-values caption-diff">
+          <div><strong>当前烧录台词</strong><pre>{voicePreview.before || '（空）'}</pre></div>
+          <label className="field">拟应用台词<textarea rows={6} value={voicePreview.dialogue} disabled={busy}
+            onChange={event => setVoicePreview({ ...voicePreview, dialogue: event.target.value })} /></label>
+        </div>
+        {!valid.success && <p className="inline-error" role="alert">{valid.error.issues[0].message}</p>}
+        {error && <p className="inline-error" role="alert">{error}</p>}
+        <div className="dialog-actions">
+          <button autoFocus type="button" disabled={busy} onClick={askClose}>返回配音稿</button>
+          <button type="button" className="primary" disabled={busy || !canApply} onClick={async () => {
+            setError('')
+            if (await onApplyVoice(voicePreview, setError)) {
+              setVoicePreview(null)
+              close()
+            }
+          }}>确认应用台词</button>
+        </div>
+      </div>
+    </Modal>
   }
   return <Modal title={`${detailLabels[kind]} · ${shot.title}`} onClose={askClose}>
     <div className="creative-dialog">
@@ -411,6 +447,8 @@ export function DetailDialog({
             setError('')
             if (await save({ type: 'keep' }, setError)) setNotice('已保留')
           }}>保留手改</button>}
+          {onApplyVoice && <button type="button" disabled={busy || changed || !stored}
+            onClick={() => { setError(''); setVoicePreview(voiceDialoguePreview(shot)) }}>预览台词差异</button>}
           <button type="button" disabled={busy} onClick={() => setConfirm('regenerate')}>按设定重新生成提示词</button>
           <button type="button" disabled={busy || !body.trim()} onClick={async () => {
             setError('')

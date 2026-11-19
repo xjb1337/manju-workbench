@@ -1,11 +1,22 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { RenderProgress, UpdateProgress, Workbench } from '../shared/api'
+import type { OpenProject, RenderProgress, UpdateProgress, Workbench } from '../shared/api'
 
 const bridge: Workbench = {
   open: () => ipcRenderer.invoke('project:open'),
   recentProjects: () => ipcRenderer.invoke('project:recent'),
   openRecent: id => ipcRenderer.invoke('project:open-recent', id),
   create: (title, sample) => ipcRenderer.invoke('project:create', title, sample),
+  onUpgradeRequired: listener => {
+    const handler = (_event: Electron.IpcRendererEvent, id: string) => listener(id)
+    ipcRenderer.on('project:upgrade-required', handler)
+    return () => ipcRenderer.removeListener('project:upgrade-required', handler)
+  },
+  answerUpgrade: (id, approved) => ipcRenderer.invoke('project:answer-upgrade', id, approved),
+  onUpgraded: listener => {
+    const handler = (_event: Electron.IpcRendererEvent, opened: OpenProject) => listener(opened)
+    ipcRenderer.on('project:upgraded', handler)
+    return () => ipcRenderer.removeListener('project:upgraded', handler)
+  },
   close: () => ipcRenderer.invoke('project:close'),
   edit: (key, change) => ipcRenderer.invoke('project:edit', key, change),
   previewPlan: (key, episodeId, text) => ipcRenderer.invoke('plan:preview', key, episodeId, text),
@@ -35,7 +46,8 @@ const bridge: Workbench = {
   cleanOrphanMedia: key => ipcRenderer.invoke('media:clean-orphans', key),
   copy: text => ipcRenderer.invoke('app:copy', text),
   openTool: (key, tool) => ipcRenderer.invoke('app:open-tool', key, tool),
-  render: (key, episodeId, mode) => ipcRenderer.invoke('episode:render', key, episodeId, mode),
+  render: (key, episodeId, mode, rebuild) => ipcRenderer.invoke('episode:render', key, episodeId, mode, rebuild),
+  exportSrt: (key, episodeId) => ipcRenderer.invoke('episode:export-srt', key, episodeId),
   cancelRender: () => ipcRenderer.invoke('episode:cancel'),
   onProgress: listener => {
     const handler = (_event: Electron.IpcRendererEvent, value: RenderProgress) => listener(value)
@@ -46,6 +58,7 @@ const bridge: Workbench = {
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   cancelUpdate: () => ipcRenderer.invoke('update:cancel'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
+  openUpdateReleasePage: () => ipcRenderer.invoke('update:open-releases'),
   openUpdateFolder: () => ipcRenderer.invoke('update:open-folder'),
   onUpdateProgress: listener => {
     const handler = (_event: Electron.IpcRendererEvent, value: UpdateProgress) => listener(value)

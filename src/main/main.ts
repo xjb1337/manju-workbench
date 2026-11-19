@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, protocol, screen, session, shell } from 'electron'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -5,20 +6,20 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { z } from 'zod'
 import type { RenderProgress, RenderResult, Reply } from '../shared/api'
-import { extensions, folderNameSchema, idSchema, mediaTargetSchema } from '../shared/model'
+import { extensions, folderNameSchema, idSchema, mediaTargetSchema, mutationSchema } from '../shared/model'
 import { detailKindSchema, detailTextSchema, frameSpec, generationKindSchema, generationPresets, generationToolUrl } from '../shared/creative'
 import { aiGatewayConfigSchema, aiInstructionSchema, magpieModelSchema, magpieScriptSchema } from '../shared/plan'
 import { magpiePlanningPrompt, scriptAiPrompt, shotDetailAiPrompt } from '../shared/prompts'
 import { generateAiTextDraft, generateMagpiePlan, testAiGateway } from './magpie'
 import { mediaResponse } from './media-protocol'
-import { exportDestination, renderEpisode } from './render'
+import { exportDestination, renderEpisode, writeEpisodeSrt } from './render'
 import { fillSample, fillVerticalSample } from './sample'
 import { RecentProjects, themeSchema, type WindowBounds } from './recent-projects'
 import { WorkbenchSession } from './session'
 import { findEpisode, findShot, ProjectStore } from './storage'
 import { cleanupStaleTempDirs, staleTempAgeMs, staleTempPrefixes } from './temp-cleanup'
 import { createProductionUpdater } from './update-system'
-import { InvalidUpdatePackageError, type Updater } from './updater'
+import { InvalidUpdatePackageError, ManualUpdateRequiredError, type Updater } from './updater'
 import { resolveInitialBounds, themeBackground } from './window-state'
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'manju-media', privileges: { standard: true, secure: true, stream: true } }])
@@ -33,6 +34,38 @@ let updater: Updater
 let recent: RecentProjects
 let boundsSave: Promise<void> = Promise.resolve()
 const workbench = new WorkbenchSession({ rememberProject: entry => recent.remember(entry) })
+class UpgradeCanceled extends Error {}
+let upgradeChoice: { id: string; resolve: (approved: boolean) => void } | undefined
+
+async function writableProject(win: BrowserWindow, key: unknown) {
+  const store = workbench.getStore(key)
+  if (!store.needsUpgrade) return store
+  const copy = await store.upgradeCopy(async () => {
+    if (win.isDestroyed()) return false
+    const id = randomUUID()
+    const closed = () => upgradeChoice?.resolve(false)
+    const approved = await new Promise<boolean>(resolve => {
+      upgradeChoice = { id, resolve }
+      win.once('closed', closed)
+      win.webContents.send('project:upgrade-required', id)
+    }).finally(() => {
+      win.removeListener('closed', closed)
+      upgradeChoice = undefined
+    })
+    return approved && !win.isDestroyed()
+  })
+  if (!copy) throw new UpgradeCanceled()
+  const mediaKey = key as string
+  workbench.current = { store: copy, key: mediaKey }
+  const project = copy.snapshot
+  if (!win.isDestroyed()) win.webContents.send('project:upgraded', { project, mediaKey, directory: copy.root })
+  await recent.remember({ directory: copy.root, title: project.title, fictional: project.fictional })
+  return copy
+}
+
+function exportLabel(title: string) {
+  return title.replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ').replace(/[. ]+$/, '').slice(0, 80)
+}
 
 function diagnose(error: unknown) {
   if (error instanceof z.ZodError) {
@@ -58,7 +91,9 @@ function handle<T>(channel: string, fn: (win: BrowserWindow, ...args: unknown[])
     try {
       return { ok: true, value: await fn(win, ...args) }
     } catch (error) {
+      if (error instanceof UpgradeCanceled) return { ok: false, error: '已取消升级', code: 'upgrade-canceled' }
       console.error(channel, error)
+      if (error instanceof ManualUpdateRequiredError) return { ok: false, error: error.message, code: 'update-manual-required' }
       if (error instanceof InvalidUpdatePackageError) return { ok: false, error: error.message, code: 'update-package-invalid' }
       return { ok: false, error: diagnose(error) }
     }
@@ -78,6 +113,10 @@ function wire() {
     if (!win.isDestroyed()) win.webContents.send('update:progress', value)
   }))
   handle('update:cancel', () => updater.cancel())
+  handle('update:open-releases', async () => {
+    await shell.openExternal('https://github.com/xjb1337/manju-workbench/releases')
+    return null
+  })
   handle('update:open-folder', async () => {
     await updater.openPortable(async directory => {
       if (await shell.openPath(directory)) throw new Error('无法打开更新包所在目录')
@@ -88,10 +127,10 @@ function wire() {
     if (workbench.editorDirty) throw new Error('请先保存修改，再安装更新')
     workbench.confirmingInstall = true
     try {
-      const started = await updater.install(async () => {
+      const started = await updater.install(async directory => {
         const response = await dialog.showMessageBox(win, {
           type: 'warning', title: '安装更新', message: '关闭工作台并启动安装程序？',
-          detail: '应用未签名。SHA-256 仅验证文件完整性，无法证明发布者身份。',
+          detail: `目标目录\n${directory}\n\n应用未签名。SHA-256 仅验证文件完整性，无法证明发布者身份。`,
           buttons: ['取消', '关闭并安装'], defaultId: 0, cancelId: 0, noLink: true,
         })
         if (workbench.editorDirty) throw new Error('请先保存修改，再安装更新')
@@ -135,10 +174,18 @@ function wire() {
     return workbench.switchProject(await ProjectStore.open(entry.directory))
   }))
   handle('project:close', () => workbench.serial(async () => { await workbench.switchProject(null); return null }))
-  handle('project:edit', (_win, key, change) => workbench.serial(async () => {
-    const store = workbench.getStore(key)
-    const project = await store.edit(change)
-    if (change && typeof change === 'object' && (change as { type?: unknown }).type === 'project.edit') {
+  handle('project:answer-upgrade', (_win, input, choice) => {
+    const id = idSchema.parse(input)
+    const approved = z.boolean().parse(choice)
+    if (upgradeChoice?.id === id) upgradeChoice.resolve(approved)
+    return null
+  })
+  handle('project:edit', (win, key, change) => workbench.serial(async () => {
+    const mutation = mutationSchema.parse(change)
+    if (mutation.type === 'shot.apply-voice' && workbench.editorDirty) throw new Error('请先保存台词或配音稿')
+    const store = await writableProject(win, key)
+    const project = await store.edit(mutation)
+    if (mutation.type === 'project.edit') {
       await recent.remember({ directory: store.root, title: project.title, fictional: project.fictional })
     }
     return project
@@ -158,7 +205,7 @@ function wire() {
   handle('ai:set-config', (_win, input) => recent.setAiGateway(aiGatewayConfigSchema.parse(input)))
   handle('ai:test-connection', (_win, input) => workbench.serial(async () => {
     const config = aiGatewayConfigSchema.parse(input)
-    return testAiGateway(config.baseUrl, config.model, new AbortController().signal)
+    return testAiGateway(config.baseUrl, new AbortController().signal)
   }))
   handle('plan:generate-magpie', (_win, key, episodeInput, modelInput, scriptInput) => workbench.serial(async () => {
     const store = workbench.getStore(key)
@@ -208,7 +255,7 @@ function wire() {
     workbench.cancelPlanGeneration(key)
     return null
   })
-  handle('plan:merge', (_win, key, token, replacements) => workbench.serial(() => workbench.getStore(key).mergePlan(token, replacements)))
+  handle('plan:merge', (win, key, token, replacements) => workbench.serial(async () => (await writableProject(win, key)).mergePlan(token, replacements)))
   handle('project:import', (win, key, input) => workbench.serial(async () => {
     const store = workbench.getStore(key)
     const target = mediaTargetSchema.parse(input)
@@ -217,20 +264,19 @@ function wire() {
     const selected = await dialog.showOpenDialog(win, { title: `导入${label}`, properties: ['openFile'],
       defaultPath: await recent.defaultDirectory('media', store.root), filters: [{ name: label, extensions: extensions[kind] }] })
     if (selected.canceled || !selected.filePaths[0]) return null
-    const project = await store.importMedia(target, selected.filePaths[0])
+    const project = await (await writableProject(win, key)).importMedia(target, selected.filePaths[0])
     await recent.rememberMedia(selected.filePaths[0])
     return project
   }))
-  handle('project:import-dropped', (_win, key, input, sourceInput) => workbench.serial(async () => {
-    const store = workbench.getStore(key)
+  handle('project:import-dropped', (win, key, input, sourceInput) => workbench.serial(async () => {
     const target = mediaTargetSchema.parse(input)
     const source = z.string().min(1).refine(path.isAbsolute, '拖入的文件路径无效').parse(sourceInput)
-    const project = await store.importMedia(target, source)
+    const project = await (await writableProject(win, key)).importMedia(target, source)
     await recent.rememberMedia(source)
     return project
   }))
   handle('media:inspect-orphans', (_win, key) => workbench.serial(() => workbench.getStore(key).inspectOrphanMedia()))
-  handle('media:clean-orphans', (_win, key) => workbench.serial(() => workbench.getStore(key).cleanOrphanMedia()))
+  handle('media:clean-orphans', (win, key) => workbench.serial(async () => (await writableProject(win, key)).cleanOrphanMedia()))
   handle('app:copy', (_win, text) => {
     clipboard.writeText(z.string().max(64 * 1024 * 1024).parse(text))
     return null
@@ -243,12 +289,27 @@ function wire() {
     await shell.openExternal(new URL(generationToolUrl.parse(url)).href)
     return null
   })
-  handle('episode:cancel', () => workbench.cancelRender())
-  handle('episode:render', (win, key, id, value) => workbench.serial(async (): Promise<RenderResult> => {
+  handle('episode:export-srt', (win, key, id) => workbench.serial(async () => {
     const store = workbench.getStore(key)
+    const project = store.snapshot
+    const episode = findEpisode(project, idSchema.parse(id))
+    const label = exportLabel(episode.title)
+    const selected = await dialog.showSaveDialog(win, {
+      title: '导出 SRT', defaultPath: path.join(store.root, `字幕 - ${label}.srt`),
+      filters: [{ name: 'SRT', extensions: ['srt'] }],
+    })
+    if (selected.canceled || !selected.filePath) return null
+    const target = await exportDestination(selected.filePath, store.root, '.srt')
+    await writeEpisodeSrt(target, episode, frameSpec(project))
+    return target
+  }))
+  handle('episode:cancel', () => workbench.cancelRender())
+  handle('episode:render', (win, key, id, value, rebuildInput) => workbench.serial(async (): Promise<RenderResult> => {
+    const mode = z.enum(['preview', 'export']).parse(value)
+    const rebuild = z.boolean().default(false).parse(rebuildInput)
+    const store = mode === 'export' ? await writableProject(win, key) : workbench.getStore(key)
     const projectSnapshot = store.snapshot
     const episode = findEpisode(projectSnapshot, idSchema.parse(id))
-    const mode = z.enum(['preview', 'export']).parse(value)
     const state = { controller: new AbortController(), publishing: false }
     workbench.job = state
     const signal = state.controller.signal
@@ -259,7 +320,7 @@ function wire() {
         previewDir = await mkdtemp(path.join(tmpdir(), 'manju-preview-'))
         target = path.join(previewDir, 'preview.mp4')
       } else {
-        const label = episode.title.replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ').replace(/[. ]+$/, '').slice(0, 80)
+        const label = exportLabel(episode.title)
         const selected = await dialog.showSaveDialog(win, { title: '导出 MP4', defaultPath: path.join(store.root, `成片 - ${label}.mp4`),
           filters: [{ name: 'MP4', extensions: ['mp4'] }] })
         if (selected.canceled || !selected.filePath) return { status: 'canceled' } as const
@@ -272,6 +333,7 @@ function wire() {
           win.webContents.send('episode:progress', value)
         }
       }
+      if (mode === 'preview' && rebuild) await workbench.dropShotCache()
       const cacheDir = await workbench.ensureShotCache()
       await renderEpisode(store, episode, target, {
         signal, progress, project: projectSnapshot, cacheDir, publish: () => { state.publishing = true },

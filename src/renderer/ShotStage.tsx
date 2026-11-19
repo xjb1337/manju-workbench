@@ -27,8 +27,12 @@ export function ShotStage({
   playerOpen,
   onOpenEpisodeScript,
   onPreview,
+  onRebuildPreview,
   onExport,
+  onExportSrt,
   onAddPrimary,
+  hasScript,
+  onWriteScript,
   onMagpie,
   onImportPlan,
   onSelectShot,
@@ -50,8 +54,12 @@ export function ShotStage({
   playerOpen: boolean
   onOpenEpisodeScript: () => void
   onPreview: () => void
+  onRebuildPreview: () => void
   onExport: () => void
+  onExportSrt: () => void
   onAddPrimary: () => void
+  hasScript: boolean
+  onWriteScript: () => void
   onMagpie: () => void
   onImportPlan: () => void
   onSelectShot: (id: string) => void
@@ -92,11 +100,13 @@ export function ShotStage({
         <button className="icon small subtle" title="集数剧本" aria-label="集数剧本" disabled={busy}
           onClick={onOpenEpisodeScript}><FileText size={17} /></button>
       </>}</div>
-      <div className="actions">
+      {shot && <div className="actions stage-render-actions">
         <span className="export-size">{spec.width} × {spec.height}</span>
         <button disabled={!canRender} onClick={onPreview}><Play size={16} weight="fill" /> 顺序预览</button>
+        {shot && <button className="subtle" disabled={!canRender} onClick={onRebuildPreview}>重新生成预览</button>}
+        {shot && <button disabled={!canRender || !episode?.shots.some(item => item.dialogue.trim())} onClick={onExportSrt}>导出 SRT</button>}
         <button className="primary" disabled={!canRender} onClick={onExport}><DownloadSimple size={18} /> 导出 MP4</button>
-      </div>
+      </div>}
     </div>
     {shot ? <section className="monitor" aria-label="镜头画面" data-ratio={spec.ratio}>
       <div className="monitor-top"><div><span className="monitor-dot" /><strong>镜头 {sequence(shotIndex)} · {shot.title}</strong></div><span>{spec.ratio}</span></div>
@@ -162,7 +172,10 @@ export function ShotStage({
       </div>
     </section> : <Empty icon={<FilmStrip size={38} weight="duotone" />}>
       <div className="empty-actions">
-        <button className="primary" disabled={busy} onClick={onMagpie}><Sparkle size={18} /> AI 生成分镜草案</button>
+        {hasScript
+          ? <button className="primary" disabled={busy} onClick={onMagpie}><Sparkle size={18} /> AI 生成分镜草案</button>
+          : <button className="primary" disabled={busy} onClick={onWriteScript}><FileText size={18} /> 写／粘贴剧本</button>}
+        {!hasScript && <button disabled={busy} onClick={onMagpie}>粘贴剧本</button>}
         <button disabled={busy} onClick={onAddPrimary}><Plus size={18} /> {episode ? '新建镜头' : '新建集数'}</button>
         <button className="subtle" disabled={busy} onClick={onImportPlan}>导入外部规划</button>
       </div>

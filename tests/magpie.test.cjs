@@ -243,30 +243,34 @@ test('generateMagpiePlan 支持自定义 OpenAI 兼容网关地址且不附带 M
   assert.equal(episode.title, '第一集')
 })
 
-test('testAiGateway 支持 /models 探测、404 回退探测与不可达报错', async () => {
-  const listed = await withMockFetch(async (url, init) => {
-    assert.equal(url, 'http://127.0.0.1:11434/v1/models')
-    assert.equal(init.method, 'GET')
-    return new Response(JSON.stringify({ data: [{ id: 'qwen2.5:14b' }, { id: 'qwen2.5:14b' }, { id: 'llama3.2' }] }), { status: 200 })
-  }, () => testAiGateway('http://127.0.0.1:11434/v1/', 'qwen2.5:14b', new AbortController().signal))
+test('testAiGateway 只请求 /models，区分有效列表、HTML、不可用 HTTP 状态与服务不可达', async () => {
+  const input = 'http://127.0.0.1:11434/v1/'
+  const request = () => testAiGateway(input, new AbortController().signal)
+  async function inspect(response) {
+    return withMockFetch(async (url, init) => {
+      assert.equal(url, 'http://127.0.0.1:11434/v1/models')
+      assert.equal(init.method, 'GET')
+      assert.equal(init.redirect, 'manual')
+      return response
+    }, request)
+  }
+  const listed = await inspect(Response.json({ data: [{ id: 'qwen2.5:14b' }, { id: 'qwen2.5:14b' }, { id: 'llama3.2' }] }))
   assert.deepEqual(listed.models, ['qwen2.5:14b', 'llama3.2'])
-  assert.equal(listed.probedByCompletion, undefined)
-
-  let calls = 0
-  const fallback = await withMockFetch(async url => {
-    calls++
-    if (url.endsWith('/models')) return new Response('not found', { status: 404 })
-    return completionResponse('ok')
-  }, () => testAiGateway('http://127.0.0.1:1234/v1', 'local-model', new AbortController().signal))
-  assert.equal(calls, 2)
-  assert.equal(fallback.probedByCompletion, true)
-
+  assert.equal(listed.modelList, 'valid')
+  assert.equal((await inspect(Response.json({ data: [] }))).modelList, 'valid')
+  assert.equal((await inspect(Response.json({}))).modelList, 'invalid')
+  assert.equal((await inspect(Response.json({ data: [{ id: ' ' }] }))).modelList, 'invalid')
+  const html = await inspect(new Response('<html>proxy</html>', { headers: { 'content-type': 'text/html' } }))
+  assert.equal(html.modelList, 'invalid')
+  assert.match(html.issue, /HTTP 200 HTML/)
+  for (const status of [302, 401, 404, 405, 500]) {
+    const result = await inspect(new Response('no models', { status }))
+    assert.equal(result.modelList, 'unavailable')
+    assert.match(result.issue, new RegExp(`HTTP ${status}`))
+  }
   await withMockFetch(
     async () => { throw new TypeError('connect ECONNREFUSED') },
-    () => assert.rejects(
-      testAiGateway('http://192.168.1.50:11434/v1', 'qwen2.5:14b', new AbortController().signal),
-      /无法连接 AI 网关.*192\.168\.1\.50:11434/,
-    ),
+    () => assert.rejects(request(), /无法连接 AI 网关.*127\.0\.0\.1:11434/),
   )
 })
 

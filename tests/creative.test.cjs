@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict')
-const { lstat, mkdtemp, readdir, readFile, rm, writeFile } = require('node:fs/promises')
+const { lstat, mkdtemp, readdir, readFile, rm, utimes, writeFile } = require('node:fs/promises')
 const { tmpdir } = require('node:os')
 const path = require('node:path')
 const { test } = require('node:test')
@@ -31,7 +31,7 @@ test('旧版 JSON 打开后保留原字段，预览与导出共享横竖画布�
   assert.equal(raw.schemaVersion, 1)
   for (const key of ['workType', 'brief', 'plan']) assert.ok(!(key in raw))
   for (const key of ['method', 'details']) assert.ok(!(key in raw.episodes[0].shots[0]))
-  const opened = await ProjectStore.open(store.root)
+  let opened = await ProjectStore.open(store.root)
   assert.deepEqual(opened.snapshot, raw)
   let renderedLandscape
   for (const [index, [ratio, width, height]] of [['16:9', 1280, 720], ['9:16', 720, 1280]].entries()) {
@@ -54,8 +54,10 @@ test('旧版 JSON 打开后保留原字段，预览与导出共享横竖画布�
       sizes.push([stream.width, stream.height])
     }
     assert.deepEqual(sizes, [[width, height], [width, height]])
+    if (!index) opened = await opened.upgradeCopy(async () => true)
     await opened.recordExport(episode, ratio, snapshot)
-    assert.equal(JSON.parse(await readFile(file, 'utf8')).schemaVersion, 2)
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).schemaVersion, 1)
+    assert.equal(opened.snapshot.schemaVersion, 2)
     if (!index) renderedLandscape = episode
   }
 })
@@ -411,10 +413,10 @@ test('cacheDir 复用镜头分片缓存，修改单镜台词或时长仅重编�
   })
   const firstEntries = (await readdir(cacheDir)).sort()
   assert.equal(firstEntries.length, 2)
-  assert.ok(firstEntries.every(name => /^[0-9a-f]{64}\.mov$/.test(name)))
+  assert.ok(firstEntries.every(name => /^[0-9a-f]{64}$/.test(name)))
   const firstStats = new Map()
   for (const name of firstEntries) {
-    const info = await lstat(path.join(cacheDir, name))
+    const info = await lstat(path.join(cacheDir, name, 'fragment.mov'))
     assert.ok(info.isFile() && info.size > 0)
     firstStats.set(name, { ino: info.ino, mtimeMs: info.mtimeMs })
   }
@@ -430,7 +432,7 @@ test('cacheDir 复用镜头分片缓存，修改单镜台词或时长仅重编�
   assert.equal(exportPercents.at(-1), 100)
   assert.deepEqual((await readdir(cacheDir)).sort(), firstEntries)
   for (const name of firstEntries) {
-    const info = await lstat(path.join(cacheDir, name))
+    const info = await lstat(path.join(cacheDir, name, 'fragment.mov'))
     assert.equal(info.ino, firstStats.get(name).ino)
     assert.equal(info.mtimeMs, firstStats.get(name).mtimeMs)
   }
@@ -456,10 +458,10 @@ test('cacheDir 复用镜头分片缓存，修改单镜台词或时长仅重编�
   })
   const updatedEntries = (await readdir(cacheDir)).sort()
   assert.equal(updatedEntries.length, 3)
-  assert.ok(updatedEntries.every(name => /^[0-9a-f]{64}\.mov$/.test(name)))
+  assert.ok(updatedEntries.every(name => /^[0-9a-f]{64}$/.test(name)))
   for (const name of firstEntries) {
     assert.ok(updatedEntries.includes(name))
-    const info = await lstat(path.join(cacheDir, name))
+    const info = await lstat(path.join(cacheDir, name, 'fragment.mov'))
     assert.equal(info.ino, firstStats.get(name).ino)
     assert.equal(info.mtimeMs, firstStats.get(name).mtimeMs)
   }
@@ -500,4 +502,122 @@ test('cacheDir 命中缓存前校验源素材存在性，源文件被移除时�
     }),
     /镜头 2 · 素材文件不存在/,
   )
+})
+
+test('缓存识别同大小同时间戳的素材替换，并自动淘汰同大小的损坏分片', async context => {
+  const { execFileSync } = require('node:child_process')
+  const { store, episodeId, shotId } = await setup(context)
+  const target = { scope: 'shot', episodeId, shotId, kind: 'image' }
+  await store.importMedia(target, path.resolve('resources/sample/01.jpg'))
+  const project = store.snapshot
+  const episode = project.episodes[0]
+  const asset = await store.assetPath(episode.shots[0].media.image.versions[0])
+  const cacheDir = path.join(store.root, 'render-cache')
+  await require('node:fs/promises').mkdir(cacheDir)
+  const output = path.join(store.root, 'preview.mp4')
+  const render = () => renderEpisode(store, episode, output, {
+    signal: AbortSignal.timeout(25_000), project, cacheDir,
+  })
+  const pixels = () => execFileSync('ffmpeg', [
+    '-nostdin', '-v', 'error', '-i', output, '-frames:v', '1', '-vf', 'scale=16:9', '-f', 'rawvideo', '-',
+  ])
+  const before = await readFile(asset)
+  const alternate = await readFile(path.resolve('resources/sample/02.jpg'))
+  const size = Math.max(before.length, alternate.length)
+  const timestamp = new Date('2025-01-01T00:00:00Z')
+  const replace = async bytes => {
+    const padded = Buffer.alloc(size)
+    bytes.copy(padded)
+    await writeFile(asset, padded)
+    await utimes(asset, timestamp, timestamp)
+    const info = await lstat(asset)
+    return [info.size, info.mtimeMs]
+  }
+  const metadata = await replace(before)
+  await render()
+  const firstPixels = pixels()
+  const [firstKey] = await readdir(cacheDir)
+
+  assert.deepEqual(await replace(alternate), metadata)
+  await render()
+  const newPixels = pixels()
+  assert.notDeepEqual(newPixels, firstPixels)
+  const [newKey] = (await readdir(cacheDir)).filter(name => name !== firstKey)
+  assert.ok(newKey)
+  const fragment = path.join(cacheDir, newKey, 'fragment.mov')
+  const originalFragment = await readFile(fragment)
+  const corrupt = Buffer.from(originalFragment)
+  corrupt[Math.floor(corrupt.length / 2)] ^= 0xff
+  await writeFile(fragment, corrupt)
+  await render()
+  assert.deepEqual(pixels(), newPixels)
+  assert.deepEqual(await readFile(fragment), originalFragment)
+  const recovered = await lstat(fragment)
+  await render()
+  assert.equal((await lstat(fragment)).mtimeMs, recovered.mtimeMs)
+  assert.deepEqual((await readdir(cacheDir)).sort(), [firstKey, newKey].sort())
+})
+
+test('配音稿差异按镜头标识应用，已变更的稿件或台词拒绝覆盖', async context => {
+  const { voiceDialoguePreview } = require('../dist/shared/prompts')
+  const { store, episodeId, shotId } = await setup(context)
+  const shot = () => store.snapshot.episodes[0].shots[0]
+  const voice = body => store.edit({ type: 'shot.detail', episodeId, shotId, kind: 'voice', action: { type: 'save', body } })
+  const update = dialogue => store.edit({ type: 'shot.edit', episodeId, shotId, fields: { ...shot(), dialogue } })
+  const apply = (preview, dialogue = preview.dialogue) => store.edit({
+    type: 'shot.apply-voice', episodeId, shotId, ...preview, dialogue,
+  })
+  assert.equal(voiceDialoguePreview(shot()), null)
+  await store.edit({ type: 'shot.detail', episodeId, shotId, kind: 'voice', action: { type: 'regenerate' } })
+  assert.equal(voiceDialoguePreview(shot()).dialogue, shot().dialogue)
+  await store.edit({ type: 'shot.add', episodeId, title: shot().title })
+  await voice('第一行\n第二行\n【轻声】')
+  const preview = voiceDialoguePreview(shot())
+  assert.deepEqual(preview, { before: '示例 / 虚构', voiceBody: '第一行\n第二行\n【轻声】', dialogue: '第一行\n第二行\n【轻声】' })
+  await update('其他编辑')
+  await assert.rejects(apply(preview), /重新预览差异/)
+  const newer = voiceDialoguePreview(shot())
+  await voice('第一行\n第二行\n【慢速】')
+  await assert.rejects(apply(newer), /重新预览差异/)
+  await apply(voiceDialoguePreview(shot()), '第一行\n第二行')
+  assert.equal(shot().dialogue, '第一行\n第二行')
+  assert.equal(shot().details.voice.body, '第一行\n第二行\n【慢速】')
+  assert.equal(store.snapshot.episodes[0].shots[1].dialogue, '')
+})
+
+test('横竖屏 SRT 和烧录 ASS 使用相同的帧分段及多行字幕，保留安全标点', () => {
+  const { episodeSrt, subtitleCues } = require('../dist/main/render')
+  const silent = { frames: 7, dialogue: '' }
+  const shot = { frames: 37, dialogue: '观测 <i>& {标记}\\N\r\n\r\n第二行\r第三行\n第四行\n第五行\n' + '长台词'.repeat(12) }
+  const tail = { frames: 2, dialogue: '结束' }
+  const toFrame = ms => Math.ceil(ms * 30 / 1000)
+  const parse = stamp => {
+    const [h, m, s, fraction] = stamp.split(/[:,.]/)
+    return (+h * 3600 + +m * 60 + +s) * 1000 + +fraction * (fraction.length === 2 ? 10 : 1)
+  }
+  for (const ratio of ['16:9', '9:16']) {
+    const spec = frameSpec({ brief: { ratio } })
+    const cues = subtitleCues(shot, spec)
+    assert.ok(cues.length > 1)
+    const ass = subtitles(shot, spec).split('\n').filter(line => line.startsWith('Dialogue: '))
+    assert.deepEqual(ass.map(line => {
+      const [, start, end] = line.split(',')
+      return [toFrame(parse(start)), toFrame(parse(end)), line.split(',,0,0,0,,')[1].split('\\N')]
+    }), cues.map(({ start, end, lines }) => [start, end, lines]))
+    const srt = episodeSrt({ shots: [silent, shot, tail] }, spec)
+    assert.match(srt, /观测 ＜i＞＆ ｛标记｝＼N\n\u00a0\n第二行/)
+    const decoded = require('node:child_process').execFileSync('ffmpeg', [
+      '-nostdin', '-v', 'error', '-f', 'srt', '-i', 'pipe:0', '-c:s', 'ass', '-f', 'ass', 'pipe:1',
+    ], { input: srt, encoding: 'utf8' })
+    assert.ok(decoded.includes('观测 ＜i＞＆ ｛标记｝＼N\\N\u00a0\\N第二行'))
+    const srtCues = srt.trimEnd().split('\n\n').map(block => {
+      const [index, time, ...lines] = block.split('\n')
+      return [+index, ...time.split(' --> ').map(stamp => toFrame(parse(stamp))), lines.map(line =>
+        line.replace(/^\u00a0$/, ''))]
+    })
+    assert.deepEqual(srtCues, [
+      ...cues.map(({ start, end, lines }, i) => [i + 1, start + 7, end + 7, lines]),
+      [cues.length + 1, 44, 46, ['结束']],
+    ])
+  }
 })

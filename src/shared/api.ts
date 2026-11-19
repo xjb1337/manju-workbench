@@ -9,7 +9,7 @@ export interface OpenProject {
   directory: string
 }
 
-export type Reply<T> = { ok: true; value: T } | { ok: false; error: string; code?: 'update-package-invalid' }
+export type Reply<T> = { ok: true; value: T } | { ok: false; error: string; code?: 'update-package-invalid' | 'update-manual-required' | 'upgrade-canceled' }
 export type RecentProject = { id: string; title: string; directory: string; fictional: boolean }
 export type Tool = GenerationKind | 'planning'
 export type RenderProgress = { mode: 'preview' | 'export'; percent: number }
@@ -22,7 +22,7 @@ export type UpdateKind = 'setup' | 'portable'
 export type UpdateCheck = { currentVersion: string } & (
   | { status: 'none' }
   | { status: 'latest'; version: string; notes: string }
-  | { status: 'available'; version: string; notes: string; kind: UpdateKind | null; unavailable?: string }
+  | { status: 'available'; version: string; notes: string; kind: UpdateKind | null; unavailable?: string; manual?: true; directory?: string }
 )
 export type UpdateProgress = { received: number; total: number }
 export type UpdateDownload = { status: 'canceled' } | { status: 'ready'; fileName: string }
@@ -32,6 +32,9 @@ export interface Workbench {
   recentProjects(): Promise<Reply<RecentProject[]>>
   openRecent(id: string): Promise<Reply<OpenProject | null>>
   create(title: string, sample: boolean | 'vertical'): Promise<Reply<OpenProject | null>>
+  onUpgradeRequired(listener: (id: string) => void): () => void
+  answerUpgrade(id: string, approved: boolean): Promise<Reply<null>>
+  onUpgraded(listener: (opened: OpenProject) => void): () => void
   close(): Promise<Reply<null>>
   edit(key: string, change: Mutation): Promise<Reply<Project>>
   previewPlan(key: string, episodeId: string | null, text: string): Promise<Reply<PlanPreview>>
@@ -53,13 +56,15 @@ export interface Workbench {
   cleanOrphanMedia(key: string): Promise<Reply<OrphanMediaReport>>
   copy(text: string): Promise<Reply<null>>
   openTool(key: string, tool: Tool): Promise<Reply<null>>
-  render(key: string, episodeId: string, mode: RenderProgress['mode']): Promise<Reply<RenderResult>>
+  render(key: string, episodeId: string, mode: RenderProgress['mode'], rebuild?: boolean): Promise<Reply<RenderResult>>
+  exportSrt(key: string, episodeId: string): Promise<Reply<string | null>>
   cancelRender(): Promise<Reply<boolean>>
   onProgress(listener: (event: RenderProgress) => void): () => void
   checkUpdate(): Promise<Reply<UpdateCheck>>
   downloadUpdate(): Promise<Reply<UpdateDownload>>
   cancelUpdate(): Promise<Reply<boolean>>
   installUpdate(): Promise<Reply<'started' | 'canceled'>>
+  openUpdateReleasePage(): Promise<Reply<null>>
   openUpdateFolder(): Promise<Reply<null>>
   onUpdateProgress(listener: (event: UpdateProgress) => void): () => void
   setEditorDirty(dirty: boolean): Promise<Reply<null>>
