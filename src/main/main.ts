@@ -5,12 +5,15 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { z } from 'zod'
-import type { OpenProject, RenderProgress, Reply } from '../shared/api'
+import type { OpenProject, RenderProgress, RenderResult, Reply } from '../shared/api'
 import { extensions, folderNameSchema, idSchema, mediaTargetSchema } from '../shared/model'
+import { frameSpec } from '../shared/creative'
 import { mediaResponse } from './media-protocol'
 import { exportDestination, renderEpisode } from './render'
-import { fillSample } from './sample'
+import { fillSample, fillVerticalSample } from './sample'
 import { allVersions, findEpisode, ProjectStore } from './storage'
+import { createProductionUpdater } from './update-system'
+import type { Updater } from './updater'
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'manju-media', privileges: { standard: true, secure: true, stream: true } }])
 const html = path.join(__dirname, '../renderer/index.html')
@@ -24,6 +27,10 @@ let preview: { directory: string; file: string; id: string } | null = null
 let operation: Promise<unknown> | undefined
 let job: { controller: AbortController; publishing: boolean } | null = null
 let quitting = false
+let updater: Updater
+let editorDirty = false
+let confirmingInstall = false
+let installerStarted = false
 
 function diagnose(error: unknown) {
   if (error instanceof z.ZodError) {
@@ -45,7 +52,7 @@ function handle<T>(channel: string, fn: (win: BrowserWindow, ...args: unknown[])
   ipcMain.handle(channel, async (event, ...args): Promise<Reply<T>> => {
     const win = window
     if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame
-      || event.senderFrame?.url !== rendererUrl || quitting) return { ok: false, error: '操作不可用' }
+      || event.senderFrame?.url !== rendererUrl || quitting || installerStarted) return { ok: false, error: '操作不可用' }
     try {
       return { ok: true, value: await fn(win, ...args) }
     } catch (error) {
@@ -81,14 +88,48 @@ function getStore(key: unknown) {
 }
 
 function wire() {
+  handle('app:editor-dirty', (_win, value) => { editorDirty = z.boolean().parse(value); return null })
+  handle('update:check', () => updater.check())
+  handle('update:download', win => updater.download(value => {
+    if (!win.isDestroyed()) win.webContents.send('update:progress', value)
+  }))
+  handle('update:cancel', () => updater.cancel())
+  handle('update:open-folder', async () => {
+    await updater.openPortable(async directory => {
+      if (await shell.openPath(directory)) throw new Error('无法打开更新包所在目录')
+    })
+    return null
+  })
+  handle('update:install', win => serial(async () => {
+    if (editorDirty) throw new Error('请先保存修改，再安装更新')
+    confirmingInstall = true
+    try {
+      const started = await updater.install(async () => {
+        const response = await dialog.showMessageBox(win, {
+          type: 'warning', title: '安装更新', message: '关闭工作台并启动安装程序？',
+          detail: '应用未签名。SHA-256 仅验证文件完整性，无法证明发布者身份。',
+          buttons: ['取消', '关闭并安装'], defaultId: 0, cancelId: 0, noLink: true,
+        })
+        if (editorDirty) throw new Error('请先保存修改，再安装更新')
+        return response.response === 1
+      })
+      if (!started) return 'canceled' as const
+      installerStarted = true
+      setImmediate(() => { if (!win.isDestroyed()) win.close() })
+      return 'started' as const
+    } finally {
+      confirmingInstall = false
+    }
+  }))
   handle('project:create', (win, title, sample) => serial(async () => {
     const name = folderNameSchema.parse(title)
-    const fictional = z.boolean().parse(sample)
+    const source = z.union([z.boolean(), z.literal('vertical')]).parse(sample)
     const selected = await dialog.showOpenDialog(win, { title: '选择保存位置', properties: ['openDirectory', 'createDirectory'] })
     if (selected.canceled || !selected.filePaths[0]) return null
-    const store = await ProjectStore.create(selected.filePaths[0], name, fictional)
+    const store = await ProjectStore.create(selected.filePaths[0], name, !!source)
     try {
-      if (fictional) await fillSample(store, resources)
+      if (source === 'vertical') await fillVerticalSample(store)
+      else if (source) await fillSample(store, resources)
       return await switchProject(store)
     } catch (error) {
       // Keep the valid partial project. Its directory may already contain user files.
@@ -102,6 +143,8 @@ function wire() {
   }))
   handle('project:close', () => serial(async () => { await switchProject(null); return null }))
   handle('project:edit', (_win, key, change) => serial(() => getStore(key).edit(change)))
+  handle('plan:preview', (_win, key, episode, input) => serial(() => getStore(key).previewPlan(episode, input)))
+  handle('plan:merge', (_win, key, token, replacements) => serial(() => getStore(key).mergePlan(token, replacements)))
   handle('project:import', (win, key, input) => serial(async () => {
     const store = getStore(key)
     const target = mediaTargetSchema.parse(input)
@@ -113,7 +156,7 @@ function wire() {
     return store.importMedia(target, selected.filePaths[0])
   }))
   handle('app:copy', (_win, text) => {
-    clipboard.writeText(z.string().max(30_000).parse(text))
+    clipboard.writeText(z.string().max(64 * 1024 * 1024).parse(text))
     return null
   })
   handle('app:open-tool', async (_win, tool) => {
@@ -125,9 +168,10 @@ function wire() {
     job.controller.abort()
     return true
   })
-  handle('episode:render', (win, key, id, value) => serial(async () => {
+  handle('episode:render', (win, key, id, value) => serial(async (): Promise<RenderResult> => {
     const store = getStore(key)
-    const episode = findEpisode(store.snapshot, idSchema.parse(id))
+    const projectSnapshot = store.snapshot
+    const episode = findEpisode(projectSnapshot, idSchema.parse(id))
     const mode = z.enum(['preview', 'export']).parse(value)
     const state = { controller: new AbortController(), publishing: false }
     job = state
@@ -152,13 +196,22 @@ function wire() {
           win.webContents.send('episode:progress', value)
         }
       }
-      await renderEpisode(store, episode, target, { signal, progress, publish: () => { state.publishing = true } })
-      if (!previewDir) return { status: 'completed', location: target } as const
+      await renderEpisode(store, episode, target, { signal, progress, project: projectSnapshot, publish: () => { state.publishing = true } })
+      if (!previewDir) {
+        try {
+          const project = await store.recordExport(episode, frameSpec(projectSnapshot).ratio, projectSnapshot)
+          return { status: 'completed', mode: 'export', location: target, project }
+        } catch (error) {
+          // The validated MP4 has been published. Report the separate project write failure.
+          console.error('episode:export-record', error)
+          return { status: 'record-failed', location: target }
+        }
+      }
       await dropPreview()
       const id = randomUUID()
       preview = { directory: previewDir, file: target, id }
       previewDir = undefined
-      return { status: 'completed', location: `manju-media://preview/${key}/${id}` } as const
+      return { status: 'completed', mode: 'preview', location: `manju-media://preview/${key}/${id}` }
     } catch (error) {
       if (signal.aborted) return { status: 'canceled' } as const
       throw error
@@ -187,7 +240,7 @@ function wire() {
 
 function createWindow() {
   const win = new BrowserWindow({
-    title: '漫剧工作台', width: 1480, height: 970, minWidth: 940, minHeight: 650, backgroundColor: '#f3f2f7',
+    title: 'AI 视频制作工作台', width: 1480, height: 970, minWidth: 940, minHeight: 650, backgroundColor: '#f3f2f7',
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.js'),
       sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true,
@@ -198,12 +251,14 @@ function createWindow() {
   win.webContents.on('will-navigate', event => event.preventDefault())
   win.webContents.on('will-attach-webview', event => event.preventDefault())
   win.webContents.on('will-prevent-unload', event => {
+    if (installerStarted) return
     const response = dialog.showMessageBoxSync(win, {
       type: 'warning', title: '退出工作台', message: '退出会放弃未保存的修改或中断当前操作。',
       buttons: ['返回', '退出'], defaultId: 0, cancelId: 0,
     })
     if (response === 1) event.preventDefault()
   })
+  win.on('close', event => { if (confirmingInstall) event.preventDefault() })
   win.on('closed', () => { window = null })
   void win.loadFile(html)
 }
@@ -214,12 +269,14 @@ if (app.requestSingleInstanceLock()) {
     Menu.setApplicationMenu(null)
     session.defaultSession.setPermissionCheckHandler(() => false)
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
+    updater = createProductionUpdater()
     wire()
     createWindow()
   })
   app.on('window-all-closed', () => {
     quitting = true
     if (!job?.publishing) job?.controller.abort()
-    void Promise.resolve(operation).catch(() => {}).then(dropPreview).finally(() => app.quit())
+    void Promise.allSettled([Promise.resolve(operation).catch(() => {}).then(dropPreview), updater.dispose()])
+      .finally(() => app.quit())
   })
 } else app.quit()

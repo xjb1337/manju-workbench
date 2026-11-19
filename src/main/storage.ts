@@ -3,9 +3,16 @@ import { constants } from 'node:fs'
 import { copyFile, lstat, mkdir, open, readFile, realpath, rename, rm, rmdir } from 'node:fs/promises'
 import path from 'node:path'
 import {
-  emptyTrack, extensions, folderNameSchema, mediaTargetSchema, mutationSchema, projectSchema,
-  versionSchema, type MediaKind, type MediaTarget, type Mutation, type Project, type Version,
+  emptyTrack, extensions, folderNameSchema, idSchema, mediaTargetSchema, mutationSchema, projectSchema,
+  versionSchema, type Episode, type MediaKind, type MediaTarget, type Mutation, type Project, type Shot, type Version,
 } from '../shared/model'
+import { frameSpec, shotMethod, type Ratio } from '../shared/creative'
+import { shotPromptBody } from '../shared/prompts'
+import type { PlanPreview } from '../shared/plan'
+import { z } from 'zod'
+import { noteCreativeChanges } from './creative-review'
+import { stagePlan } from './plan-import'
+import { exportInputsChanged } from '../shared/production'
 import { mediaInput, probe, runTool } from './process'
 
 export const projectFilename = 'project.json'
@@ -73,8 +80,46 @@ function trackFor(project: Project, target: MediaTarget) {
     : findReference(project, target.category, target.referenceId).image
 }
 
+function setOmitted(shot: Shot, kind: MediaKind, omitted: boolean) {
+  if (omitted) shot.omittedMedia = { ...shot.omittedMedia, [kind]: true }
+  else if (shot.omittedMedia) {
+    delete shot.omittedMedia[kind]
+    if (!Object.keys(shot.omittedMedia).length) delete shot.omittedMedia
+  }
+}
+
+function resumeMedia(project: Project, target: MediaTarget) {
+  if (target.scope === 'shot') setOmitted(findShot(project, target.episodeId, target.shotId), target.kind, false)
+}
+
 function mutate(project: Project, change: Mutation) {
   switch (change.type) {
+    case 'project.brief':
+      project.workType = change.workType
+      project.brief = change.brief
+      break
+    case 'shot.detail': {
+      const episode = findEpisode(project, change.episodeId)
+      const shot = findShot(project, change.episodeId, change.shotId)
+      const details = shot.details ??= {}
+      const existing = details[change.kind]
+      if (change.action.type === 'keep') {
+        if (!existing) throw new Error('请先保存提示词')
+        delete existing.needsUpdate
+      } else if (change.action.type === 'save') {
+        if (!change.action.body.trim()) throw new Error('提示词不能为空')
+        details[change.kind] = { body: change.action.body, source: 'manual' }
+      } else {
+        details[change.kind] = { body: shotPromptBody(project, episode, shot, change.kind), source: 'template' }
+      }
+      break
+    }
+    case 'media.keep': {
+      const version = trackFor(project, change.target).versions.find(item => item.id === change.versionId)
+      if (!version) throw new Error('素材版本不存在')
+      delete version.needsUpdate
+      break
+    }
     case 'project.edit':
       project.title = change.title
       project.script = change.script
@@ -88,14 +133,23 @@ function mutate(project: Project, change: Mutation) {
     case 'episode.remove':
       project.episodes = project.episodes.filter(episode => episode.id !== change.episodeId)
       break
-    case 'shot.add':
-      findEpisode(project, change.episodeId).shots.push({
-        id: randomUUID(), title: change.title, frames: 225, dialogue: '', prompt: '', status: '待制作',
+    case 'shot.add': {
+      const episode = findEpisode(project, change.episodeId)
+      const target = project.brief?.targetSeconds
+      const frames = target && project.episodes.length === 1 && !episode.shots.length
+        ? Math.min(18_000, Math.max(1, Math.round(target * 30))) : 225
+      episode.shots.push({
+        id: randomUUID(), title: change.title, frames, dialogue: '', prompt: '', status: '待制作',
+        ...(project.workType && { method: shotMethod(project) }),
         media: { image: emptyTrack(), video: emptyTrack(), audio: emptyTrack() },
       })
       break
+    }
     case 'shot.edit':
       Object.assign(findShot(project, change.episodeId, change.shotId), change.fields)
+      break
+    case 'shot.omit-media':
+      setOmitted(findShot(project, change.episodeId, change.shotId), change.kind, change.omitted)
       break
     case 'shot.remove': {
       const episode = findEpisode(project, change.episodeId)
@@ -125,6 +179,7 @@ function mutate(project: Project, change: Mutation) {
       const track = trackFor(project, change.target)
       if (!track.versions.some(version => version.id === change.versionId)) throw new Error('素材版本不存在')
       track.activeId = change.versionId
+      resumeMedia(project, change.target)
       break
     }
   }
@@ -138,6 +193,7 @@ export function allVersions(project: Project) {
 
 export class ProjectStore {
   private tail: Promise<unknown> = Promise.resolve()
+  private pendingPlan?: { token: string; base: Project; staged: ReturnType<typeof stagePlan> }
 
   private constructor(readonly root: string, private document: Project) {}
 
@@ -182,6 +238,14 @@ export class ProjectStore {
   }
 
   private async commit(next: Project) {
+    noteCreativeChanges(this.document, next)
+    const ratioChanged = frameSpec(this.document).ratio !== frameSpec(next).ratio
+    const previous = new Map(this.document.episodes.map(episode => [episode.id, episode]))
+    for (const episode of next.episodes) {
+      if (!episode.exportRecord || episode.exportRecord.stale) continue
+      const before = previous.get(episode.id)
+      if (before && (ratioChanged || exportInputsChanged(before, episode, this.document, next))) episode.exportRecord.stale = true
+    }
     const valid = projectSchema.parse(next)
     await atomicJson(path.join(this.root, projectFilename), valid)
     this.document = valid
@@ -193,6 +257,42 @@ export class ProjectStore {
     return this.queue(async () => {
       const next = this.snapshot
       mutate(next, change)
+      return this.commit(next)
+    })
+  }
+
+  previewPlan(episodeInput: unknown, input: unknown): Promise<PlanPreview> {
+    const episodeId = idSchema.nullable().parse(episodeInput)
+    return this.queue(async () => {
+      this.pendingPlan = undefined
+      const staged = stagePlan(this.snapshot, episodeId, input)
+      const token = randomUUID()
+      this.pendingPlan = { token, base: this.document, staged }
+      return { token, changes: staged.changes }
+    })
+  }
+
+  mergePlan(tokenInput: unknown, choicesInput: unknown) {
+    const token = idSchema.parse(tokenInput)
+    const choices = z.array(z.string().regex(/^\d+$/)).max(5000).parse(choicesInput)
+    return this.queue(async () => {
+      const pending = this.pendingPlan
+      if (!pending || pending.token !== token || pending.base !== this.document) {
+        throw new Error('规划预览已失效，请重新预览')
+      }
+      if (!pending.staged.changes.length) throw new Error('没有可合并的变更')
+      const next = pending.staged.apply(choices)
+      this.pendingPlan = undefined
+      return this.commit(next)
+    })
+  }
+
+  recordExport(rendered: Episode, ratio: Ratio = frameSpec(this.document).ratio, renderedProject = this.document) {
+    return this.queue(async () => {
+      const next = this.snapshot
+      const episode = findEpisode(next, rendered.id)
+      if (frameSpec(next).ratio !== ratio || exportInputsChanged(rendered, episode, renderedProject, next)) throw new Error('成片内容已变更')
+      episode.exportRecord = { exportedAt: new Date().toISOString(), stale: false }
       return this.commit(next)
     })
   }
@@ -248,9 +348,13 @@ export class ProjectStore {
         try { await handle.sync() } finally { await handle.close() }
         await rename(temp, file)
         archived = true
-        const version = versionSchema.parse({ id, name: path.basename(source), extension, createdAt: new Date().toISOString(), seconds })
+        const version = versionSchema.parse({
+          id, name: path.basename(source), extension, createdAt: new Date().toISOString(), seconds,
+          ...(kind === 'video' && audio && { hasAudio: true }),
+        })
         track.versions.push(version)
         track.activeId = id
+        resumeMedia(project, target)
         return await this.commit(project)
       } catch (error) {
         if (archived) await rm(file, { force: true }).catch(() => {})

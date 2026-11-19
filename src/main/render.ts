@@ -1,11 +1,11 @@
 import { lstat, mkdtemp, open, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { activeVersion, folderNameSchema, totalFrames, type Episode, type Shot } from '../shared/model'
+import { shotMedia, folderNameSchema, totalFrames, type Episode, type Shot } from '../shared/model'
+import { frameSpec, shotMethod, usesFinishedVideo, type FrameSpec } from '../shared/creative'
+import type { Project } from '../shared/model'
 import { mediaInput, probe, runTool } from './process'
 import { checkedFile, type ProjectStore } from './storage'
 
-const width = 1280
-const height = 720
 const fps = 30
 const sampleRate = 48_000
 
@@ -22,7 +22,7 @@ function assTime(frames: number) {
   return `${Math.floor(centiseconds / 360_000)}:${pad(Math.floor(centiseconds / 6000) % 60)}:${pad(Math.floor(centiseconds / 100) % 60)}.${pad(centiseconds % 100)}`
 }
 
-function subtitles(shot: Shot) {
+export function subtitles(shot: Shot, { width, height, subtitle }: FrameSpec) {
   const font = process.platform === 'win32' ? 'Microsoft YaHei' : 'Noto Sans CJK SC'
   return `[Script Info]
 ScriptType: v4.00+
@@ -32,7 +32,7 @@ PlayResY: ${height}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Chinese,${font},38,&H00FFFFFF,&H00FFFFFF,&H00141020,&H00141020,0,0,0,0,100,100,0,0,1,3,1,2,62,62,45,1
+Style: Chinese,${font},${subtitle.size},&H00FFFFFF,&H00FFFFFF,&H00141020,&H00141020,0,0,0,0,100,100,0,0,1,3,1,2,${subtitle.horizontal},${subtitle.horizontal},${subtitle.bottom},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -44,15 +44,22 @@ function seconds(frames: number) {
   return (frames / fps).toFixed(9)
 }
 
-async function encodeShot(store: ProjectStore, shot: Shot, filename: string, cwd: string, signal: AbortSignal) {
-  const visual = activeVersion(shot.media.video) ?? activeVersion(shot.media.image)
-  const voice = activeVersion(shot.media.audio)
-  const visualArgs = visual ? mediaInput(await store.assetPath(visual), visual.extension)
+async function encodeShot(store: ProjectStore, shot: Shot, file: string, cwd: string, project: Project, spec: FrameSpec, signal: AbortSignal) {
+  const { width, height } = spec
+  const method = shotMethod(project, shot)
+  const video = shotMedia(shot, 'video', method)
+  const visual = video ?? shotMedia(shot, 'image', method)
+  const voice = shotMedia(shot, 'audio', method)
+  const visualPath = visual && await store.assetPath(visual)
+  const visualArgs = visual && visualPath ? mediaInput(visualPath, visual.extension)
     : ['-f', 'lavfi', '-i', `color=c=black:s=${width}x${height}:r=${fps}`]
-  const audioArgs = voice ? mediaInput(await store.assetPath(voice), voice.extension)
+  // Probe earlier manifests that predate the embedded-audio marker.
+  const embeddedAudio = !voice && !shot.omittedMedia?.audio && video && visualPath && usesFinishedVideo(method)
+    && (video.hasAudio || (await probe(visualPath, video.extension, signal)).streams.some(stream => stream.codec_type === 'audio'))
+  const audioArgs = embeddedAudio ? [] : voice ? mediaInput(await store.assetPath(voice), voice.extension)
     : ['-f', 'lavfi', '-i', `anullsrc=r=${sampleRate}:cl=mono`]
   const caption = subtitleText(shot.dialogue)
-  if (caption) await writeFile(path.join(cwd, 'caption.ass'), subtitles(shot), 'utf8')
+  if (caption) await writeFile(path.join(cwd, 'caption.ass'), subtitles(shot, spec), 'utf8')
   const videoFilter = [
     'setpts=PTS-STARTPTS',
     `fps=${fps}:eof_action=pass`,
@@ -66,11 +73,11 @@ async function encodeShot(store: ProjectStore, shot: Shot, filename: string, cwd
   const audioFilter = `aresample=${sampleRate}:first_pts=0,asetpts=N/SR/TB,apad,atrim=end_sample=${shot.frames * (sampleRate / fps)}`
   await runTool('ffmpeg', [
     '-nostdin', '-v', 'error', '-xerror', '-filter_threads', '2', ...visualArgs, ...audioArgs,
-    '-map', '0:V:0', '-map', '1:a:0', '-vf', videoFilter, '-af', audioFilter,
+    '-map', '0:V:0', '-map', embeddedAudio ? '0:a:0' : '1:a:0', '-vf', videoFilter, '-af', audioFilter,
     '-c:v', 'libx264', '-threads:v', '3', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
     '-bf', '0', '-video_track_timescale', '30000', '-color_range', 'tv', '-colorspace', 'bt709',
     '-c:a', 'pcm_s16le', '-ar', String(sampleRate), '-ac', '2', '-map_metadata', '-1', '-map_chapters', '-1',
-    '-f', 'mov', filename,
+    '-f', 'mov', file,
   ], { cwd, signal })
 }
 
@@ -96,8 +103,11 @@ export async function renderEpisode(
   store: ProjectStore,
   episode: Episode,
   destination: string,
-  options: { signal: AbortSignal; progress?: (percent: number) => void; publish?: () => void },
+  options: { signal: AbortSignal; progress?: (percent: number) => void; publish?: () => void; project?: Project },
 ) {
+  const project = options.project ?? store.snapshot
+  const spec = frameSpec(project)
+  const { width, height } = spec
   if (!episode.shots.length) throw new Error('请先新建镜头')
   const temp = await mkdtemp(path.join(path.dirname(destination), '.manju-render-'))
   try {
@@ -108,7 +118,7 @@ export async function renderEpisode(
       options.signal.throwIfAborted()
       const file = `shot-${i}.mov`
       try {
-        await encodeShot(store, shot, file, temp, options.signal)
+        await encodeShot(store, shot, file, temp, project, spec, options.signal)
       } catch (error) {
         options.signal.throwIfAborted()
         const detail = (error as NodeJS.ErrnoException).code === 'ENOENT' ? '素材文件不存在' : (error as Error).message

@@ -1,6 +1,6 @@
 {
   "name": "manju-workbench",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "本地漫剧制作工作台",
   "author": "Manju Workbench",
@@ -24,14 +24,17 @@
       "package.json",
       "resources/sample/*.jpg"
     ],
-    "artifactName": "Manju-Workbench-${version}-${arch}-Setup.${ext}",
     "win": {
       "target": "nsis",
       "signAndEditExecutable": false
     },
     "nsis": {
+      "artifactName": "Manju-Workbench-${version}-${arch}-Setup.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "portable": {
+      "artifactName": "Manju-Workbench-${version}-${arch}-Portable.${ext}"
     },
     "directories": {
       "output": "release"

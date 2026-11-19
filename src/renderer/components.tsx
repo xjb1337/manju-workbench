@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowDown, ArrowUp, Check, FilmStrip, Image as ImageIcon, MusicNote, Plus, Trash, UploadSimple } from '@phosphor-icons/react'
 import type { OpenProject } from '../shared/api'
-import { activeVersion, timecode, type Episode, type MediaKind, type Track, type Version } from '../shared/model'
+import { frameSpec, shotMethod } from '../shared/creative'
+import { activeVersion, shotMedia, timecode, type Episode, type MediaKind, type Track, type Version } from '../shared/model'
 
 export const kindLabel: Record<MediaKind, string> = { image: '参考图', video: '视频', audio: '配音' }
 const kindIcon = { image: ImageIcon, video: FilmStrip, audio: MusicNote }
@@ -9,25 +10,29 @@ export const sequence = (index: number) => String(index + 1).padStart(2, '0')
 export const mediaUrl = (opened: OpenProject, version: Version) => `manju-media://project/${opened.mediaKey}/${version.id}`
 
 export function Badge({ value }: { value: string }) {
-  const color = { 待制作: 'idle', 待审核: 'review', 已通过: 'approved' }[value] ?? 'fiction'
+  const color = { 待制作: 'idle', 待审核: 'review', 已通过: 'approved', 需更新: 'review', 冲突: 'review', 已保存: 'approved', 来自规划: 'fiction', 未保存: 'idle' }[value] ?? 'fiction'
   return <span className={`badge ${color}`}>{value}</span>
 }
 
-export function MediaRow({ track, kind, busy, onImport, onActivate }: {
-  track: Track; kind: MediaKind; busy: boolean; onImport: () => void; onActivate: (id: string) => void
+export function MediaRow({ track, kind, busy, onImport, onActivate, onKeep }: {
+  track: Track; kind: MediaKind; busy: boolean; onImport: () => void; onActivate: (id: string) => void; onKeep: (id: string) => void
 }) {
   const Icon = kindIcon[kind]
   const active = activeVersion(track)
-  return <div className="media-row">
+  return <div className="media-version"><div className="media-row">
     <div className="asset-type"><span className="asset-icon"><Icon size={16} /></span><strong>{kindLabel[kind]}</strong></div>
     {active && <select aria-label={`${kindLabel[kind]}活动版本`} title={active.name} value={active.id} disabled={busy}
       onChange={event => onActivate(event.target.value)}>
-      {track.versions.map((version, index) => <option key={version.id} value={version.id}>V{index + 1} · {version.name}</option>)}
+      {track.versions.map((version, index) => <option key={version.id} value={version.id}>V{index + 1} · {version.name}{version.needsUpdate ? ' · 需更新' : ''}</option>)}
     </select>}
     <button type="button" className="small subtle import" aria-label={`导入${kindLabel[kind]}`} disabled={busy} onClick={onImport}>
       <UploadSimple size={15} /> 导入
     </button>
-  </div>
+  </div>{active?.needsUpdate && <div className="media-review">
+    <Badge value="需更新" />
+    <button type="button" className="small subtle" aria-label={`保留此版本 · ${kindLabel[kind]}`} disabled={busy}
+      onClick={() => onKeep(active.id)}>保留此版本</button>
+  </div>}</div>
 }
 
 export function Timeline({ opened, episode, shotId, busy, onSelect, onAdd, onMove }: {
@@ -36,7 +41,8 @@ export function Timeline({ opened, episode, shotId, busy, onSelect, onAdd, onMov
 }) {
   const index = episode.shots.findIndex(shot => shot.id === shotId)
   let start = 0
-  return <section className="timeline" aria-label="镜头时间线">
+  const spec = frameSpec(opened.project)
+  return <section className="timeline" aria-label="镜头时间线" data-ratio={spec.ratio}>
     <div className="section-head">
       <div className="section-label"><FilmStrip size={18} /><h3>镜头时间线</h3><span className="counter">{episode.shots.length}</span></div>
       <div className="actions">
@@ -47,13 +53,18 @@ export function Timeline({ opened, episode, shotId, busy, onSelect, onAdd, onMov
     </div>
     {!!episode.shots.length && <div className="filmstrip">
       {episode.shots.map((shot, position) => {
-        const image = activeVersion(shot.media.image)
+        const method = shotMethod(opened.project, shot)
+        const image = shotMedia(shot, 'image', method)
+        const video = shotMedia(shot, 'video', method)
         const from = start
         start += shot.frames
         return <button key={shot.id} className="clip" disabled={busy} aria-pressed={shot.id === shotId} onClick={() => onSelect(shot.id)}
           aria-label={`镜头 ${sequence(position)} ${shot.title}`}>
           <div className="clip-ruler">{timecode(from, true)}</div>
-          <div className="clip-image">{image ? <img src={mediaUrl(opened, image)} alt="" /> : <FilmStrip size={26} />}<b>{sequence(position)}</b></div>
+          <div className="clip-image" style={{ aspectRatio: `${spec.width} / ${spec.height}` }}>
+            {image ? <img src={mediaUrl(opened, image)} alt="" /> : video
+              ? <video src={mediaUrl(opened, video) + '#t=0.12'} preload="metadata" muted aria-hidden="true" />
+              : <FilmStrip size={26} />}<b>{sequence(position)}</b></div>
           <div className="clip-meta"><strong>{shot.title}</strong><span>{timecode(shot.frames, true)}</span></div>
           <div className={`clip-state ${shot.status === '已通过' ? 'approved' : shot.status === '待审核' ? 'review' : 'idle'}`} title={shot.status} />
         </button>
