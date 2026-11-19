@@ -1,0 +1,129 @@
+import { z } from 'zod'
+import {
+  defaultMethod, detailLabels, frameSpec, methodLabels, shotMethod, usesFinishedVideo, workTypeLabels, type Brief, type DetailKind,
+} from './creative'
+import { activeVersion, timecode, type Episode, type Project, type Shot } from './model'
+import { externalPlanSchema } from './plan'
+
+export const briefFields = {
+  theme: '主题', audience: '受众', targetSeconds: '目标时长（秒）', ratio: '画面比例',
+  style: '风格', language: '语言', tools: '使用工具', terms: '术语表',
+} satisfies Record<keyof Brief, string>
+
+const requiredBrief = ['theme', 'audience', 'targetSeconds', 'style', 'language', 'tools'] as const
+
+export function missingBrief(brief: Brief = {}) {
+  return requiredBrief.filter(key => key === 'targetSeconds' ? !brief[key] : !brief[key]?.trim()).map(key => briefFields[key])
+}
+
+function referenceContext(project: Project) {
+  return (['characters', 'scenes'] as const).map(category => project[category].map(reference => ({
+    名称: reference.title, 设定: reference.notes.trim() || undefined, 参考图: activeVersion(reference.image)?.name,
+  })))
+}
+
+export function sharedSettings(project: Project) {
+  const spec = frameSpec(project)
+  const brief = project.brief ?? {}
+  const [characters, scenes] = referenceContext(project)
+  return {
+    作品类型: workTypeLabels[project.workType ?? 'story'],
+    主题: brief.theme || undefined, 受众: brief.audience || undefined, 目标时长秒: brief.targetSeconds,
+    画面比例: spec.ratio, 画布: `${spec.width}×${spec.height}`, 帧率: 30,
+    风格: brief.style || undefined, 语言: brief.language || undefined, 使用工具: brief.tools || undefined,
+    术语: brief.terms || undefined, 角色: characters, 场景: scenes,
+  }
+}
+
+export function sharedSettingsKey(project: Project) {
+  return JSON.stringify([sharedSettings(project),
+    [...project.characters, ...project.scenes].map(reference => [reference.id, reference.image.activeId])])
+}
+
+export function legacyDetail(shot: Shot, kind: DetailKind) {
+  if (kind === 'image') return shot.prompt
+  if (kind === 'flow') return shot.videoPrompt ?? ''
+  return ''
+}
+
+export function shotPromptBody(project: Project, episode: Episode, shot: Shot, kind: DetailKind) {
+  const method = shotMethod(project, shot)
+  const index = episode.shots.findIndex(item => item.id === shot.id)
+  const from = episode.shots.slice(0, index).reduce((sum, item) => sum + item.frames, 0)
+  const duration = Number((shot.frames / 30).toFixed(3))
+  const reference = shot.omittedMedia?.image ? undefined : activeVersion(shot.media.image)?.name
+  const referenceLine = reference ? `人工附上「${reference}」，沿用构图与设定。` : '按作品设定中的参考图人工附上；未给出的参考图列为待补。'
+  const legacy = legacyDetail(shot, kind).trim()
+  const header = `${detailLabels[kind]}｜${shot.title}\n${project.fictional ? '示例 / 虚构\n' : ''}集内 ${timecode(from, true)} 至 ${timecode(from + shot.frames, true)}，${shot.frames} 帧，约 ${duration} 秒。`
+  const sections: Record<DetailKind, string[]> = {
+    image: [
+      '主体：依镜头意图与角色／场景设定描述外观、姿态、道具及相对位置。',
+      '构图与景别：明确横竖向、主体位置、前中后景、留白和拍摄角度。',
+      '风格与光线：沿用作品风格，指定光源方向、色温、阴影及主色。',
+      `参考图：${referenceLine}`,
+      '画面文字：逐字使用已指定的文案和位置；未指定则留空，给字幕预留安全区。',
+      '禁用元素：水印、错误文字、重复主体、未经设定的道具或角色变化。',
+    ],
+    flow: [
+      `参考图：${referenceLine}`,
+      '主体动作：按时间顺序写清动作、速度、视线和环境变化。',
+      '镜头运动：明确固定或运动轨迹、方向、速度和景别变化。',
+      `起止状态与时长：写明首帧与尾帧的姿态、构图、光线；动作在 ${shot.frames} 帧内结束。`,
+      '不可变化：角色外观、服装、场景布局、文字和道具连续；沿用项目画面比例。',
+    ],
+    code: [
+      `实现工具：${project.brief?.tools || '待补'}。说明语言、渲染器及运行环境。`,
+      `画布：按作品共享设定中的画布尺寸和比例，30 fps，共 ${shot.frames} 帧。`,
+      `素材：${referenceLine} 列明文件、用途及缺项。`,
+      `动画安排：按帧或逐秒列出 0 至 ${duration} 秒内的起止状态、元素、数值、运动与缓动。`,
+      '字体：指定支持作品语言的字体、字号、层级、换行和安全边距。',
+      '音频同步：标出台词、配乐与动作对齐的帧位；按素材可用性列出缺项。',
+      '运行与导出命令：返回完整源文件、依赖安装、运行与渲染命令，输出 H.264 MP4。',
+      '验收标准：核对宽高、帧率、帧数、首尾帧、文字安全区及音画同步；可整段导入镜头。',
+    ],
+    voice: [
+      `逐句文案：${shot.dialogue.trim() || '待补'}`,
+      '读音：标出人名、术语、数字及多音字的读法。',
+      '停顿与情绪：逐句标注停顿、重音、语速和情绪。',
+      '时间安排：以镜头起点为 0，给出每句开始和结束的帧位及尾部留白。',
+      shot.omittedMedia?.audio ? '交付：静默，保留字幕。' : usesFinishedVideo(method) ? '交付：可随成片导入，或另交配音与字幕文案。' : '交付：配音文件与逐句字幕文案。',
+    ],
+  }
+  const direction = legacy ? `\n已存镜头意图：${legacy}` : ''
+  // Legacy body can already reach the field limit. It remains in the old editor.
+  const template = [header, ...sections[kind]].join('\n')
+  return template + direction.slice(0, 30_000 - template.length)
+}
+
+export function shotPromptContext(project: Project) {
+  return `作品共享设定\n画布尺寸、画面比例及语言以本节为准。\n${JSON.stringify(sharedSettings(project), null, 2)}`
+}
+
+export function shotPromptText(project: Project, body: string) {
+  return `${shotPromptContext(project)}\n\n${body}`
+}
+
+const returnSchema = JSON.stringify(z.toJSONSchema(externalPlanSchema), null, 2)
+
+export function planningPrompt(project: Project, episode?: Episode) {
+  const existing = episode && {
+    title: episode.title, script: episode.script || undefined,
+    shots: episode.shots.map(shot => ({
+      shotId: shot.id, title: shot.title, frames: shot.frames, method: shotMethod(project, shot),
+      dialogue: shot.dialogue || undefined,
+    })),
+  }
+  const missing = missingBrief(project.brief)
+  return [
+    '请根据以下制作简报制定视频制作计划。返回一份符合下方格式的 UTF-8 JSON。只返回 JSON 对象，省略代码围栏与说明文字。',
+    project.fictional ? '本作品为示例 / 虚构，所有示例内容须继续标明。' : '',
+    `待补项：${missing.length ? missing.join('、') : '无'}。按已给信息规划；缺少的事实写入 missing，省略不确定字段，勿编造角色、数据、素材或工具。`,
+    '输出大纲 outline、作品剧本 script、集数剧本 episode.script、素材清单 assets 和分镜表 episode.shots。每镜头按制作方式返回适用的 details。',
+    `默认制作方式为 ${defaultMethod(project.workType)}。可按镜独立选择 ${Object.entries(methodLabels).map(([id, label]) => `${id}（${label}）`).join('、')}。`,
+    '按 30 fps 计算每镜 frames，合计与目标时长对应。更新现有镜头时沿用下方 shotId；新增镜头省略 shotId，并填 title 和 frames。资料不足以排分镜时用空 shots。',
+    'image 写主体、构图、景别、风格、光线、参考图、画面文字、禁用元素；flow 写参考图、主体动作、镜头运动、起止状态、时长、不可变化元素；code 写实现工具、指定画布尺寸、素材、逐秒或逐镜动画、字体、音频同步、运行与导出命令、验收标准；voice 写逐句文案、读音、停顿、情绪、时间安排。逐镜沿用同一份角色、术语、风格、画面规格与语言。',
+    `制作简报与共享设定\n${JSON.stringify(sharedSettings(project), null, 2)}`,
+    `当前作品\n${JSON.stringify({ title: project.title, script: project.script || undefined, outline: project.plan?.outline, assets: project.plan?.assets, episode: existing }, null, 2)}`,
+    `返回格式（JSON Schema）\n${returnSchema}`,
+  ].filter(Boolean).join('\n\n')
+}

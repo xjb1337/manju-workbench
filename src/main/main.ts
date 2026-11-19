@@ -7,9 +7,10 @@ import { pathToFileURL } from 'node:url'
 import { z } from 'zod'
 import type { OpenProject, RenderProgress, RenderResult, Reply } from '../shared/api'
 import { extensions, folderNameSchema, idSchema, mediaTargetSchema } from '../shared/model'
+import { frameSpec } from '../shared/creative'
 import { mediaResponse } from './media-protocol'
 import { exportDestination, renderEpisode } from './render'
-import { fillSample } from './sample'
+import { fillSample, fillVerticalSample } from './sample'
 import { allVersions, findEpisode, ProjectStore } from './storage'
 import { createProductionUpdater } from './update-system'
 import type { Updater } from './updater'
@@ -122,12 +123,13 @@ function wire() {
   }))
   handle('project:create', (win, title, sample) => serial(async () => {
     const name = folderNameSchema.parse(title)
-    const fictional = z.boolean().parse(sample)
+    const source = z.union([z.boolean(), z.literal('vertical')]).parse(sample)
     const selected = await dialog.showOpenDialog(win, { title: '选择保存位置', properties: ['openDirectory', 'createDirectory'] })
     if (selected.canceled || !selected.filePaths[0]) return null
-    const store = await ProjectStore.create(selected.filePaths[0], name, fictional)
+    const store = await ProjectStore.create(selected.filePaths[0], name, !!source)
     try {
-      if (fictional) await fillSample(store, resources)
+      if (source === 'vertical') await fillVerticalSample(store)
+      else if (source) await fillSample(store, resources)
       return await switchProject(store)
     } catch (error) {
       // Keep the valid partial project. Its directory may already contain user files.
@@ -141,6 +143,8 @@ function wire() {
   }))
   handle('project:close', () => serial(async () => { await switchProject(null); return null }))
   handle('project:edit', (_win, key, change) => serial(() => getStore(key).edit(change)))
+  handle('plan:preview', (_win, key, episode, input) => serial(() => getStore(key).previewPlan(episode, input)))
+  handle('plan:merge', (_win, key, token, replacements) => serial(() => getStore(key).mergePlan(token, replacements)))
   handle('project:import', (win, key, input) => serial(async () => {
     const store = getStore(key)
     const target = mediaTargetSchema.parse(input)
@@ -152,7 +156,7 @@ function wire() {
     return store.importMedia(target, selected.filePaths[0])
   }))
   handle('app:copy', (_win, text) => {
-    clipboard.writeText(z.string().max(30_000).parse(text))
+    clipboard.writeText(z.string().max(64 * 1024 * 1024).parse(text))
     return null
   })
   handle('app:open-tool', async (_win, tool) => {
@@ -166,7 +170,8 @@ function wire() {
   })
   handle('episode:render', (win, key, id, value) => serial(async (): Promise<RenderResult> => {
     const store = getStore(key)
-    const episode = findEpisode(store.snapshot, idSchema.parse(id))
+    const projectSnapshot = store.snapshot
+    const episode = findEpisode(projectSnapshot, idSchema.parse(id))
     const mode = z.enum(['preview', 'export']).parse(value)
     const state = { controller: new AbortController(), publishing: false }
     job = state
@@ -191,10 +196,10 @@ function wire() {
           win.webContents.send('episode:progress', value)
         }
       }
-      await renderEpisode(store, episode, target, { signal, progress, publish: () => { state.publishing = true } })
+      await renderEpisode(store, episode, target, { signal, progress, project: projectSnapshot, publish: () => { state.publishing = true } })
       if (!previewDir) {
         try {
-          const project = await store.recordExport(episode)
+          const project = await store.recordExport(episode, frameSpec(projectSnapshot).ratio, projectSnapshot)
           return { status: 'completed', mode: 'export', location: target, project }
         } catch (error) {
           // The validated MP4 has been published. Report the separate project write failure.
@@ -235,7 +240,7 @@ function wire() {
 
 function createWindow() {
   const win = new BrowserWindow({
-    title: '漫剧工作台', width: 1480, height: 970, minWidth: 940, minHeight: 650, backgroundColor: '#f3f2f7',
+    title: 'AI 视频制作工作台', width: 1480, height: 970, minWidth: 940, minHeight: 650, backgroundColor: '#f3f2f7',
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.js'),
       sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true,

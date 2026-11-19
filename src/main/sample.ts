@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { runTool } from './process'
 import type { ShotFields } from '../shared/model'
 import { ProjectStore } from './storage'
 
@@ -42,11 +43,21 @@ export function sampleTone(frequency: number, seconds = 1.15) {
 export async function fillSample(store: ProjectStore, assets: string) {
   const temp = await mkdtemp(path.join(tmpdir(), 'manju-sample-'))
   try {
+    await store.edit({ type: 'project.brief', workType: 'story', brief: {
+      theme: '一封旧信与雾港灯塔', audience: '短篇故事观众', targetSeconds: 30, ratio: '16:9',
+      style: '紫蓝与暖光的手绘动画', language: '简体中文', tools: 'ChatGPT、Google Flow',
+    } })
     await store.edit({ type: 'project.edit', title: store.snapshot.title, script: '雾港值守人收到一封旧信，沿码头走向灯塔。' })
     let project = await store.edit({ type: 'episode.add', title: '第 1 集 · 雾港来信' })
     const episodeId = project.episodes[0].id
     await store.edit({ type: 'episode.edit', episodeId, title: project.episodes[0].title, script: shots.map(shot => shot.dialogue).join('\n') })
     const image = (index: number) => path.join(assets, `0${index + 1}.jpg`)
+    project = await store.edit({ type: 'reference.add', category: 'characters', title: '港口值守人' })
+    await store.edit({ type: 'reference.edit', category: 'characters', referenceId: project.characters[0].id,
+      title: '港口值守人', notes: '深紫色旧大衣，左袖有缝线。' })
+    await store.importMedia({ scope: 'reference', category: 'characters', referenceId: project.characters[0].id }, image(1))
+    project = await store.edit({ type: 'reference.add', category: 'scenes', title: '雾港灯塔' })
+    await store.importMedia({ scope: 'reference', category: 'scenes', referenceId: project.scenes[0].id }, image(2))
     for (const [index, fields] of shots.entries()) {
       project = await store.edit({ type: 'shot.add', episodeId, title: fields.title })
       const shotId = project.episodes[0].shots.at(-1)!.id
@@ -56,12 +67,46 @@ export async function fillSample(store: ProjectStore, assets: string) {
       await writeFile(audio, sampleTone(255 + index * 90))
       await store.importMedia({ scope: 'shot', episodeId, shotId, kind: 'audio' }, audio)
     }
-    project = await store.edit({ type: 'reference.add', category: 'characters', title: '港口值守人' })
-    await store.edit({ type: 'reference.edit', category: 'characters', referenceId: project.characters[0].id,
-      title: '港口值守人', notes: '深紫色旧大衣，左袖有缝线。' })
-    await store.importMedia({ scope: 'reference', category: 'characters', referenceId: project.characters[0].id }, image(1))
-    project = await store.edit({ type: 'reference.add', category: 'scenes', title: '雾港灯塔' })
-    await store.importMedia({ scope: 'reference', category: 'scenes', referenceId: project.scenes[0].id }, image(2))
+  } finally {
+    await rm(temp, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+export async function fillVerticalSample(store: ProjectStore) {
+  const temp = await mkdtemp(path.join(tmpdir(), 'manju-signal-'))
+  const script = '虚构观测站的信号从单点亮起，随后分成两组脉冲。'
+  try {
+    await store.edit({ type: 'project.brief', workType: 'code', brief: {
+      theme: '虚构观测站的脉冲信号', audience: '动态图形观众', targetSeconds: 6, ratio: '9:16',
+      style: '深蓝网格、青绿脉冲与琥珀色对照', language: '简体中文', tools: 'FFmpeg 滤镜',
+      terms: '脉冲：观测图上一次短暂的信号升高。',
+    } })
+    await store.edit({ type: 'project.edit', title: store.snapshot.title, script })
+    const created = await store.edit({ type: 'episode.add', title: '信号观测' })
+    const episodeId = created.episodes[0].id
+    for (const [index, { title, dialogue, frames }] of [
+      { title: '第一束信号', dialogue: '第一束信号从网格底部亮起。', frames: 72 },
+      { title: '双脉冲', dialogue: '两组脉冲以不同的节奏交替。', frames: 108 },
+    ].entries()) {
+      const next = await store.edit({ type: 'shot.add', episodeId, title })
+      const shotId = next.episodes[0].shots.at(-1)!.id
+      await store.edit({ type: 'shot.edit', episodeId, shotId, fields: { title, dialogue, frames, prompt: '', status: '已通过', method: 'code' } })
+      const bars = Array.from({ length: 8 }, (_, bar) => {
+        const h = (index * 99 + bar * 137) % 385 + 145
+        const color = index && bar % 2 ? '0xffc47e' : '0x62e6d2'
+        return `drawbox=x=${86 + bar * 70}:y=${865 - h}:w=49:h=${h}:color=${color}:t=fill:enable='gte(t,${bar * frames / 300})'`
+      })
+      const video = path.join(temp, `虚构 信号 ${index + 1}.mp4`)
+      await runTool('ffmpeg', [
+        '-nostdin', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=0x15253e:s=720x1280:r=30',
+        '-f', 'lavfi', '-i', `sine=frequency=${index ? 330 : 220}:sample_rate=48000`,
+        '-vf', ['drawgrid=width=56:height=56:thickness=1:color=0x53809d@0.40',
+          'drawbox=x=64:y=865:w=592:h=4:color=0x9bbacb:t=fill', ...bars].join(','),
+        '-t', String(frames / 30), '-c:v', 'libx264', '-threads:v', '2', '-pix_fmt', 'yuv420p', '-c:a', 'aac', video,
+      ], { signal: AbortSignal.timeout(60_000) })
+      await store.importMedia({ scope: 'shot', episodeId, shotId, kind: 'video' }, video)
+      await store.edit({ type: 'shot.detail', episodeId, shotId, kind: 'code', action: { type: 'regenerate' } })
+    }
   } finally {
     await rm(temp, { recursive: true, force: true }).catch(() => {})
   }

@@ -308,6 +308,245 @@ async function verifyMedia(destination, folder, inputs) {
   console.log('画面顺序、活动替换、四帧硬字幕和镜头起点音调同步通过', audioMeasurements)
 }
 
+async function verifyCreative(folder, parent, profile) {
+  let desktop = await launch(profile)
+  try {
+    let { app, page } = desktop
+    await choose(app, parent)
+    await named(page, '创建竖屏代码示例', '观测站信号', '选择保存位置')
+    const project = path.join(parent, '观测站信号')
+    const file = path.join(project, 'project.json')
+    await page.getByText('示例 / 虚构', { exact: true }).waitFor()
+    const initial = await documentAt(file)
+    const episode = initial.episodes[0]
+    const [first, second] = episode.shots
+    assert.equal(initial.fictional, true)
+    assert.equal(initial.workType, 'code')
+    assert.deepEqual(await guide(page).locator('[data-step]').evaluateAll(steps => steps.map(step => step.dataset.step)),
+      ['script', 'shots', 'code', 'finished', 'audio', 'export'])
+    await guideStatus(page, 'code', '已完成')
+    await guideStatus(page, 'finished', '已完成')
+
+    await selectStep(page, 'finished')
+    const source = path.join(folder, '手工导入 竖屏成片.mp4')
+    const version = first.media.video.versions[0]
+    await copyFile(path.join(project, 'media', `${version.id}.${version.extension}`), source)
+    await choose(app, source)
+    await button(guide(page), '导入成片').click()
+    await page.getByLabel('视频活动版本').locator('option').getByText(/手工导入 竖屏成片/).waitFor({ state: 'attached' })
+    await footerSaved(page)
+
+    await selectStep(page, 'code')
+    await button(guide(page), '编辑代码任务书').click()
+    let task = page.getByRole('dialog', { name: /代码任务书/ })
+    const body = dialog => dialog.getByLabel('提示词正文')
+    const manual = '手改：沿网格底线依次点亮矩形，强调第一个虚构脉冲。'
+    const generated = await body(task).inputValue()
+    await task.getByText('9:16 · 720 × 1280 · 30 fps', { exact: true }).waitFor()
+    await body(task).fill(`${generated}\n\n${manual}`)
+    await button(task, '保存提示词').click()
+    await task.getByRole('status').getByText('已保存').waitFor()
+    const manualBody = await body(task).inputValue()
+    await button(task, '关闭').click()
+
+    await button(directory(page), '制作简报').click()
+    await page.getByLabel('作品类型').selectOption('mixed')
+    await page.getByLabel('主题').fill('虚构观测站的节拍与信号')
+    await page.getByLabel('受众').fill('动态图形入门观众')
+    await page.getByLabel('风格', { exact: true }).fill('深蓝网格、青绿脉冲、细线图表')
+    await page.getByLabel('术语表').fill('脉冲：观测值的短时升高。')
+    await page.getByLabel('目标时长（秒）').fill('6.25')
+    await page.getByLabel('画面比例').selectOption('16:9')
+    await page.getByLabel('画面比例').selectOption('9:16')
+    await button(stage(page), '保存简报').click()
+    await footerSaved(page)
+    await screenshot(page, 'creative-01-brief-light.png')
+    await button(page, '切换深色').click()
+    await screenshot(page, 'creative-02-brief-dark.png')
+    await button(page, '切换浅色').click()
+
+    await button(stage(page), '总规划提示词').click()
+    const planner = page.getByRole('dialog', { name: '总规划提示词', exact: true })
+    await button(planner, '复制总规划提示词').click()
+    await planner.getByRole('status').getByText('已复制').waitFor()
+    const clipboard = () => app.evaluate(({ clipboard }) => clipboard.readText())
+    const total = await clipboard()
+    assert.match(total, /UTF-8 JSON/)
+    assert.match(total, /"画布": "720×1280"/)
+    assert.match(total, /"目标时长秒": 6.25/)
+    assert.match(total, /示例 \/ 虚构/)
+    assert.ok(total.includes(first.id))
+    await screenshot(page, 'creative-03-planning-prompt.png')
+    await button(planner, '关闭').click()
+
+    const before = await documentAt(file)
+    await button(stage(page), '导入外部规划').click()
+    const paste = page.getByRole('dialog', { name: '导入外部规划', exact: true })
+    await paste.getByLabel('规划 JSON').fill('{"schemaVersion": 1}')
+    await button(paste, '预览差异').click()
+    await paste.getByRole('alert').getByText(/规划格式错误/).waitFor()
+    assert.deepEqual(await documentAt(file), before)
+    await paste.getByLabel('规划 JSON').fill(JSON.stringify({
+      schemaVersion: 1,
+      title: '虚构观测站的信号',
+      script: '虚构观测员按照节拍记录两组脉冲。',
+      outline: '示例 / 虚构。第一组脉冲出现，随后两组信号交替。',
+      assets: ['信号网格：由本地代码绘制'], missing: [],
+      episode: {
+        title: '观测记录',
+        script: '第一束信号亮起，第二束错开半拍。',
+        shots: [
+          { shotId: first.id, details: { code: '规划建议：用蓝白波形替换所有矩形。' } },
+          { shotId: second.id, method: 'imported', dialogue: '两组虚构脉冲交替出现。' },
+        ],
+      },
+    }))
+    await button(paste, '预览差异').click()
+    const preview = page.getByRole('dialog', { name: '规划导入预览', exact: true })
+    await preview.waitFor()
+    const codeConflict = preview.getByRole('combobox', { name: /代码任务书处理方式/ })
+    assert.equal(await codeConflict.inputValue(), 'keep')
+    await preview.getByRole('combobox', { name: /^集数.*标题处理方式$/ }).selectOption('update')
+    await preview.getByRole('combobox', { name: /双脉冲.*制作方式处理方式$/ }).selectOption('update')
+    assert.deepEqual(await documentAt(file), before)
+    await preview.locator('.plan-diff').evaluate(diff => { diff.scrollTop = 0 })
+    await screenshot(page, 'creative-04-plan-diff.png')
+    await button(preview, '确认合并').click()
+    await preview.waitFor({ state: 'hidden' })
+    await footerSaved(page)
+    const merged = await documentAt(file)
+    assert.equal(merged.title, before.title)
+    assert.equal(merged.episodes[0].title, '观测记录')
+    assert.equal(merged.episodes[0].shots[1].method, 'imported')
+    assert.equal(merged.episodes[0].shots[0].details.code.body, manualBody)
+    assert.equal(merged.episodes[0].shots[0].details.code.needsUpdate, true)
+    assert.deepEqual(merged.episodes[0].shots[0].media, before.episodes[0].shots[0].media)
+    assert.equal(merged.episodes[0].shots[0].media.video.versions.length, 2)
+    await stage(page).getByRole('region', { name: '规划成果' }).waitFor()
+
+    await selectStep(page, 'code')
+    await guideStatus(page, 'code', '需更新')
+    await button(guide(page), '编辑代码任务书').click()
+    task = page.getByRole('dialog', { name: /代码任务书/ })
+    await task.getByText('需更新', { exact: true }).waitFor()
+    await button(task, '按设定重新生成提示词').click()
+    await task.getByText('重新生成会替换本条提示词正文。').waitFor()
+    assert.equal(await body(task).inputValue(), manualBody)
+    await button(task, '继续编辑').click()
+    await button(task, '保留手改').click()
+    await task.getByRole('status').getByText('已保留').waitFor()
+    assert.equal(await body(task).inputValue(), manualBody)
+    await button(task, '复制代码任务书').click()
+    await task.getByRole('status').getByText('已复制').waitFor()
+    const copied = await clipboard()
+    assert.match(copied, /作品共享设定[\s\S]*720×1280[\s\S]*观测值的短时升高/)
+    assert.ok(copied.endsWith(manualBody))
+    await screenshot(page, 'creative-05-code-task.png')
+    await button(task, '关闭').click()
+    await guideStatus(page, 'code', '已完成')
+    await guideStatus(page, 'finished', '已完成')
+
+    const monitorVideo = page.locator('.monitor-body video')
+    await monitorVideo.waitFor()
+    await monitorVideo.evaluate(video => { video.currentTime = 1.7 })
+    await page.waitForFunction(() => document.querySelector('.monitor-body video')?.readyState >= 2
+      && !document.querySelector('.monitor-body video').seeking)
+    assert.equal(await page.locator('.monitor').getAttribute('data-ratio'), '9:16')
+    const direction = await page.locator('.monitor-body').boundingBox()
+    assert.ok(Math.abs(direction.width / direction.height - 9 / 16) < .02)
+    const thumbnail = await page.locator('.clip-image').first().boundingBox()
+    assert.ok(thumbnail.height > thumbnail.width)
+    await screenshot(page, 'creative-06-portrait-timeline.png')
+
+    await app.close()
+    desktop = await launch(profile)
+    ;({ app, page } = desktop)
+    await choose(app, project)
+    await button(page, '打开作品').first().click()
+    await page.getByRole('heading', { name: '观测站信号', exact: true }).waitFor()
+    await button(directory(page), '制作简报').click()
+    assert.equal(await page.getByLabel('作品类型').inputValue(), 'mixed')
+    assert.equal(await page.getByLabel('画面比例').inputValue(), '9:16')
+    assert.equal(await page.getByLabel('目标时长（秒）').inputValue(), '6.25')
+    assert.equal(await page.getByLabel('主题').inputValue(), '虚构观测站的节拍与信号')
+    await selectStep(page, 'code')
+    await button(guide(page), '编辑代码任务书').click()
+    task = page.getByRole('dialog', { name: /代码任务书/ })
+    assert.equal(await body(task).inputValue(), manualBody)
+    await button(task, '关闭').click()
+
+    await button(stage(page), '顺序预览').click()
+    const player = page.locator('video.episode-player')
+    await player.waitFor({ timeout: 45_000 })
+    await page.waitForFunction(() => document.querySelector('.episode-player')?.readyState >= 2)
+    const measured = await player.evaluate(video => {
+      video.currentTime = 1.7
+      video.pause()
+      return [video.videoWidth, video.videoHeight, video.duration]
+    })
+    assert.deepEqual(measured.slice(0, 2), [720, 1280])
+    assert.ok(Math.abs(measured[2] - 6) < .08)
+    await page.waitForFunction(() => !document.querySelector('.episode-player').seeking)
+    await screenshot(page, 'creative-07-portrait-preview.png')
+    await button(page, '关闭预览').click()
+
+    const destination = path.join(project, '观测站 竖屏成片.mp4')
+    await selectStep(page, 'export')
+    await choose(app, destination, 'saveChoices')
+    await button(guide(page), '导出 MP4').click()
+    await page.getByText(/导出完成/).waitFor({ timeout: 45_000 })
+    await guideStatus(page, 'export', '已完成')
+    assert.match(await stage(page).locator('.export-size').textContent(), /720 × 1280/)
+    await screenshot(page, 'creative-08-portrait-export.png')
+    const probe = JSON.parse(command('ffprobe', ['-v', 'error', '-show_format', '-show_streams', '-of', 'json', destination]))
+    const [video, audio] = probe.streams
+    assert.deepEqual([video.width, video.height, video.avg_frame_rate, video.nb_frames], [720, 1280, '30/1', '180'])
+    assert.equal(video.codec_name, 'h264')
+    assert.equal(audio.codec_name, 'aac')
+    const frame = ffmpeg('-ss', '1', '-i', destination, '-frames:v', '1', '-vf', 'format=gray', '-f', 'rawvideo', '-')
+    assert.equal(frame.length, 720 * 1280)
+    assert.ok(frame.subarray(720 * 1100, 720 * 1230).some(value => value > 225), '竖屏底部安全区应保留硬字幕')
+    const pcm = ffmpeg('-i', destination, '-vn', '-ac', '1', '-f', 's16le', '-')
+    assert.ok(toneAmplitude(pcm, .3, 220) > 500, '整段导入的成片应保留其自带音频')
+    assert.ok(toneAmplitude(pcm, 3, 330) > 500, '混合方式中的仅导入成片应保留原声')
+    await writeFile(path.join(folder, 'ffprobe-portrait.json'), JSON.stringify(probe, null, 2))
+    const exportHash = await hash(destination)
+
+    await button(directory(page), '制作简报').click()
+    await page.getByLabel('画面比例').selectOption('16:9')
+    await button(stage(page), '保存简报').click()
+    await footerSaved(page)
+    await guideStatus(page, 'export', '已过期')
+    assert.equal(await hash(destination), exportHash)
+    await selectStep(page, 'code')
+    await button(guide(page), '编辑代码任务书').click()
+    task = page.getByRole('dialog', { name: /代码任务书/ })
+    assert.equal(await body(task).inputValue(), manualBody)
+    await button(task, '按设定重新生成提示词').click()
+    await button(task, '确认替换').click()
+    await task.getByRole('status').getByText('已重新生成').waitFor()
+    await task.getByText('16:9 · 1280 × 720 · 30 fps', { exact: true }).waitFor()
+    assert.match(await body(task).inputValue(), /按作品共享设定中的画布尺寸/)
+    assert.doesNotMatch(await body(task).inputValue(), /手改：/)
+    await button(task, '关闭').click()
+
+    // Keep the final acceptance project at its original portrait specification.
+    await button(directory(page), '制作简报').click()
+    await page.getByLabel('画面比例').selectOption('9:16')
+    await button(stage(page), '保存简报').click()
+    await footerSaved(page)
+    await selectStep(page, 'export')
+    await choose(app, destination, 'saveChoices')
+    await button(guide(page), '导出 MP4').click()
+    await page.getByText(/导出完成/).waitFor({ timeout: 45_000 })
+    await guideStatus(page, 'export', '已完成')
+    console.log('竖屏验收成片', destination, '720 × 1280 / 180 帧')
+    return { project, destination, ffprobe: path.join(folder, 'ffprobe-portrait.json') }
+  } finally {
+    await desktop.app.close().catch(() => {})
+  }
+}
+
 async function main() {
   await mkdir(screenshots, { recursive: true })
   const verify = path.join(run, 'verification')
@@ -523,6 +762,7 @@ async function main() {
     await player.evaluate(video => { video.currentTime = 8; video.pause() })
     await page.waitForFunction(() => !document.querySelector('.episode-player').seeking)
     await screenshot(page, '06-ordered-preview.png')
+    await screenshot(page, 'creative-00-landscape-preview.png')
     await button(page, '关闭预览').click()
 
     const destination = path.join(project, '成片 验收.mp4')
@@ -634,10 +874,11 @@ async function main() {
     assert.deepEqual(await documentAt(projectFile), finalManifest)
     assert.ok((await readdir(project)).every(name => !name.startsWith('.manju-render-')))
     await app.close()
+    const portrait = await verifyCreative(folder, parent, path.join(folder, '竖屏 Electron Profile'))
     await verifyUpdates(folder, project)
     assert.deepEqual(await documentAt(projectFile), finalManifest)
     await writeFile(path.join(folder, 'acceptance.json'), JSON.stringify({
-      project, destination, sha256: sha, restartedElectron: true, replacementStillActive: track.versions[1].id,
+      project, destination, portrait, sha256: sha, restartedElectron: true, replacementStillActive: track.versions[1].id,
       dialogCanceledPreservedHash: true, renderCanceledPreservedHash: true, missingAssetPreservedHash: true,
       temporaryDirectoriesCleaned: true, guideEmptyPartialComplete: true, guideExternalStubAndClipboard: true,
       guidePerEpisodeAndStaleAfterRestart: true, skippedVideoAndAudioRetainCaptions: true,

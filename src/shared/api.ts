@@ -1,5 +1,7 @@
 import type { MediaTarget, Mutation, Project } from './model'
 
+import type { PlanPreview } from './plan'
+
 export interface OpenProject {
   project: Project
   mediaKey: string
@@ -24,9 +26,11 @@ export type UpdateProgress = { received: number; total: number }
 export type UpdateDownload = { status: 'canceled' } | { status: 'ready'; fileName: string }
 export interface Workbench {
   open(): Promise<Reply<OpenProject | null>>
-  create(title: string, sample: boolean): Promise<Reply<OpenProject | null>>
+  create(title: string, sample: boolean | 'vertical'): Promise<Reply<OpenProject | null>>
   close(): Promise<Reply<null>>
   edit(key: string, change: Mutation): Promise<Reply<Project>>
+  previewPlan(key: string, episodeId: string | null, text: string): Promise<Reply<PlanPreview>>
+  mergePlan(key: string, token: string, replacements: string[]): Promise<Reply<Project>>
   importMedia(key: string, target: MediaTarget): Promise<Reply<Project | null>>
   copy(text: string): Promise<Reply<null>>
   openTool(tool: Tool): Promise<Reply<null>>

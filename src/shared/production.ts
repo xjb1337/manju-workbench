@@ -1,3 +1,4 @@
+import { shotMethod, usesFinishedVideo, usesTrack } from './creative'
 import { activeVersion, kinds, shotMedia, type Episode, type MediaKind, type Project, type Shot } from './model'
 
 export const productionSteps = [
@@ -10,41 +11,79 @@ export const productionSteps = [
   { id: 'export', label: '导出' },
 ] as const
 
-export type StepId = typeof productionSteps[number]['id']
+const codeStep = { id: 'code', label: '代码任务' } as const
+const finishedStep = { id: 'finished', label: '成片导入' } as const
+export type StepId = typeof productionSteps[number]['id'] | typeof codeStep.id | typeof finishedStep.id
 export type StepStatus = 'complete' | 'partial' | 'incomplete' | 'stale'
 
 export function productionProgress(project: Project, episodeId?: string) {
   const episode = project.episodes.find(item => item.id === episodeId)
   const shots = episode?.shots ?? []
   const missingReferences = (['characters', 'scenes'] as const).filter(category => !project[category].length)
-  const mediaStatus = (kind: MediaKind) => {
-    const items = shots.map((shot, index) => ({
-      id: shot.id, title: shot.title, index,
-      state: shot.omittedMedia?.[kind] ? 'omitted' : activeVersion(shot.media[kind]) ? 'ready' : 'missing',
-    } as const))
+  const available = shots.length ? shots.map(shot => shotMethod(project, shot)) : [shotMethod(project)]
+  const showReferences = (project.workType ?? 'story') === 'story'
+    || (project.workType === 'mixed' && available.some(method => !usesFinishedVideo(method)))
+  const showImage = available.some(method => usesTrack(method, 'image'))
+  const showFlow = available.some(method => method === 'flow' || method === 'flow-only')
+  const steps = [
+    productionSteps[0], ...(showReferences ? [productionSteps[1]] : []), productionSteps[2],
+    ...(showImage ? [productionSteps[3]] : []), ...(showFlow ? [productionSteps[4]] : []),
+    ...(available.includes('code') ? [codeStep] : []), ...(available.some(usesFinishedVideo) ? [finishedStep] : []),
+    productionSteps[5], productionSteps[6],
+  ]
+  const measure = (includes: (shot: Shot) => boolean, check: (shot: Shot) => 'omitted' | 'ready' | 'missing' | 'stale') => {
+    const items = shots.flatMap((shot, index) => includes(shot)
+      ? [{ id: shot.id, title: shot.title, index, state: check(shot) }] : [])
     const missing = items.filter(item => item.state === 'missing').length
     const omitted = items.filter(item => item.state === 'omitted').length
-    const ready = items.length - missing - omitted
-    const status: StepStatus = !items.length ? 'incomplete' : !missing ? 'complete' : ready + omitted ? 'partial' : 'incomplete'
-    return { items, missing, omitted, ready, status }
+    const stale = items.filter(item => item.state === 'stale').length
+    const ready = items.length - missing - omitted - stale
+    const status: StepStatus = !items.length ? 'incomplete'
+      : !missing ? 'complete' : ready + omitted + stale ? 'partial' : 'incomplete'
+    return { items, missing, omitted, ready, stale, status }
   }
-  const media = { image: mediaStatus('image'), video: mediaStatus('video'), audio: mediaStatus('audio') }
-  const statuses: Record<StepId, StepStatus> = {
+  const mediaState = (shot: Shot, kind: MediaKind) => {
+    if (shot.omittedMedia?.[kind]) return 'omitted'
+    const method = shotMethod(project, shot)
+    const version = activeVersion(shot.media[kind]) ??
+      (kind === 'audio' && usesFinishedVideo(method) ? shotMedia(shot, 'video', method) : undefined)
+    return version?.needsUpdate ? 'stale' : version ? 'ready' : 'missing'
+  }
+  const media = {
+    image: measure(shot => usesTrack(shotMethod(project, shot), 'image'), shot => mediaState(shot, 'image')),
+    video: measure(shot => !usesFinishedVideo(shotMethod(project, shot)) && usesTrack(shotMethod(project, shot), 'video'),
+      shot => mediaState(shot, 'video')),
+    audio: measure(() => true, shot => mediaState(shot, 'audio')),
+    finished: measure(shot => usesFinishedVideo(shotMethod(project, shot)), shot => mediaState(shot, 'video')),
+    code: measure(shot => shotMethod(project, shot) === 'code', shot => {
+      const detail = shot.details?.code
+      return detail?.needsUpdate ? 'stale' : detail?.body.trim() ? 'ready' : 'missing'
+    }),
+  }
+
+  const allStatuses: Record<StepId, StepStatus> = {
     script: project.script.trim() || episode?.script.trim() ? 'complete' : 'incomplete',
     references: !missingReferences.length ? 'complete' : missingReferences.length === 1 ? 'partial' : 'incomplete',
     shots: shots.some(shot => Number.isFinite(shot.frames) && shot.frames > 0) ? 'complete' : 'incomplete',
     image: media.image.status,
     video: media.video.status,
     audio: media.audio.status,
+    finished: media.finished.status,
+    code: media.code.stale ? 'stale' : media.code.status,
     export: episode?.exportRecord ? episode.exportRecord.stale ? 'stale' : 'complete' : 'incomplete',
   }
-  const recommended = productionSteps.find(({ id }) => statuses[id] !== 'complete')?.id
-  return { statuses, recommended, missingReferences, media, dialogueCount: shots.filter(shot => shot.dialogue.trim()).length }
+  const statuses = Object.fromEntries(steps.map(({ id }) => [id, allStatuses[id]])) as Partial<Record<StepId, StepStatus>>
+  const recommended = steps.find(({ id }) => statuses[id] !== 'complete')?.id
+  return { steps, statuses, recommended, missingReferences, media, dialogueCount: shots.filter(shot => shot.dialogue.trim()).length }
 }
 
-export function exportInputsChanged(before: Episode, after: Episode) {
-  function inputs(shot: Shot) {
-    return [shot.id, shot.frames, shot.dialogue, ...kinds.map(kind => [shot.media[kind].activeId, shotMedia(shot, kind)?.id])]
+export function exportInputsChanged(before: Episode, after: Episode, beforeProject: Pick<Project, 'workType'> = {}, afterProject = beforeProject) {
+  function inputs(shot: Shot, project: Pick<Project, 'workType'>) {
+    const method = shotMethod(project, shot)
+    const embeddedAudio = usesFinishedVideo(method) && !shot.omittedMedia?.audio && !shotMedia(shot, 'audio', method)
+      ? shotMedia(shot, 'video', method)?.id : undefined
+    return [shot.id, shot.frames, shot.dialogue, embeddedAudio,
+      ...kinds.map(kind => [shot.media[kind].activeId, shotMedia(shot, kind, method)?.id])]
   }
-  return JSON.stringify(before.shots.map(inputs)) !== JSON.stringify(after.shots.map(inputs))
+  return JSON.stringify(before.shots.map(shot => inputs(shot, beforeProject))) !== JSON.stringify(after.shots.map(shot => inputs(shot, afterProject)))
 }
