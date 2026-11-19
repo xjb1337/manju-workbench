@@ -775,6 +775,21 @@ async function verifyLegacyUpgrade(folder) {
       assert.deepEqual(await readFile(path.join(fixture.root, 'media', name)), fixture.mediaBytes[index])
       assert.deepEqual(await readFile(path.join(parent, copy, 'media', name)), fixture.mediaBytes[index])
     }
+    await button(page.getByRole('dialog', { name: '总规划提示词' }), '关闭').click()
+    await button(directory(page), '分镜').click()
+    await button(stage(page), '重新生成预览').waitFor()
+    await screenshot(page, 'feature-preview-rebuild.png')
+    await button(stage(page), '顺序预览').click()
+    await page.locator('video.episode-player').waitFor({ timeout: 45_000 })
+    await button(page, '关闭预览').click()
+    const before = (await readdir(tmpdir())).filter(name => name.startsWith('manju-shot-cache-'))
+    await button(stage(page), '重新生成预览').click()
+    await page.locator('video.episode-player').waitFor({ timeout: 45_000 })
+    await page.waitForFunction(() => document.querySelector('.episode-player')?.readyState >= 2)
+    const after = (await readdir(tmpdir())).filter(name => name.startsWith('manju-shot-cache-'))
+    assert.equal(before.length, after.length)
+    assert.equal(after.filter(name => !before.includes(name)).length, 1)
+    await button(page, '关闭预览').click()
   } finally {
     await app.close()
   }

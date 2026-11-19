@@ -279,8 +279,9 @@ function wire() {
     return null
   })
   handle('episode:cancel', () => workbench.cancelRender())
-  handle('episode:render', (win, key, id, value) => workbench.serial(async (): Promise<RenderResult> => {
+  handle('episode:render', (win, key, id, value, rebuildInput) => workbench.serial(async (): Promise<RenderResult> => {
     const mode = z.enum(['preview', 'export']).parse(value)
+    const rebuild = z.boolean().default(false).parse(rebuildInput)
     const store = mode === 'export' ? await writableProject(win, key) : workbench.getStore(key)
     const projectSnapshot = store.snapshot
     const episode = findEpisode(projectSnapshot, idSchema.parse(id))
@@ -307,6 +308,7 @@ function wire() {
           win.webContents.send('episode:progress', value)
         }
       }
+      if (mode === 'preview' && rebuild) await workbench.dropShotCache()
       const cacheDir = await workbench.ensureShotCache()
       await renderEpisode(store, episode, target, {
         signal, progress, project: projectSnapshot, cacheDir, publish: () => { state.publishing = true },

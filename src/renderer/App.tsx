@@ -343,11 +343,11 @@ export function App() {
     setAsk({ kind: 'remove', title, name, change })
   }
 
-  async function render(mode: RenderProgress['mode']) {
+  async function render(mode: RenderProgress['mode'], rebuild = false) {
     if (!opened || !episode || running.current) return
     setProgress({ mode, percent: 0 })
     try {
-      await run(() => api.render(opened.mediaKey, episode.id, mode), result => {
+      await run(() => api.render(opened.mediaKey, episode.id, mode, rebuild), result => {
         if (result.status === 'canceled') setMessage({ text: mode === 'export' ? '已取消导出' : '已取消预览' })
         else if (result.status === 'record-failed') setMessage({ text: `成片已导出 · 导出记录保存失败 · ${result.location}`, error: true })
         else if (result.mode === 'preview') setPlayer(result.location)
@@ -504,7 +504,7 @@ export function App() {
         {tab === 'shots' ? <ShotStage opened={opened} episode={episode} shot={shot} shotIndex={shotIndex} spec={spec}
           method={method} busy={busy} canRender={canRender} playerOpen={Boolean(player)}
           onOpenEpisodeScript={() => navigate(() => { setScriptScope('episode'); setTab('script'); setDirty(false); setEditorRevision(value => value + 1) })}
-          onPreview={() => void render('preview')} onExport={requestExport}
+          onPreview={() => void render('preview')} onRebuildPreview={() => void render('preview', true)} onExport={requestExport}
           onAddPrimary={() => episode ? addShot() : addEpisode()}
           onMagpie={() => openMagpieDialog()}
           onImportPlan={() => setCreativeDialog('import')}

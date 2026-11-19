@@ -56,7 +56,7 @@ export interface Workbench {
   cleanOrphanMedia(key: string): Promise<Reply<OrphanMediaReport>>
   copy(text: string): Promise<Reply<null>>
   openTool(key: string, tool: Tool): Promise<Reply<null>>
-  render(key: string, episodeId: string, mode: RenderProgress['mode']): Promise<Reply<RenderResult>>
+  render(key: string, episodeId: string, mode: RenderProgress['mode'], rebuild?: boolean): Promise<Reply<RenderResult>>
   cancelRender(): Promise<Reply<boolean>>
   onProgress(listener: (event: RenderProgress) => void): () => void
   checkUpdate(): Promise<Reply<UpdateCheck>>

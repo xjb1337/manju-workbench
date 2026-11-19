@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict')
-const { lstat, mkdtemp, readdir, readFile, rm, writeFile } = require('node:fs/promises')
+const { lstat, mkdtemp, readdir, readFile, rm, utimes, writeFile } = require('node:fs/promises')
 const { tmpdir } = require('node:os')
 const path = require('node:path')
 const { test } = require('node:test')
@@ -413,10 +413,10 @@ test('cacheDir 复用镜头分片缓存，修改单镜台词或时长仅重编�
   })
   const firstEntries = (await readdir(cacheDir)).sort()
   assert.equal(firstEntries.length, 2)
-  assert.ok(firstEntries.every(name => /^[0-9a-f]{64}\.mov$/.test(name)))
+  assert.ok(firstEntries.every(name => /^[0-9a-f]{64}$/.test(name)))
   const firstStats = new Map()
   for (const name of firstEntries) {
-    const info = await lstat(path.join(cacheDir, name))
+    const info = await lstat(path.join(cacheDir, name, 'fragment.mov'))
     assert.ok(info.isFile() && info.size > 0)
     firstStats.set(name, { ino: info.ino, mtimeMs: info.mtimeMs })
   }
@@ -432,7 +432,7 @@ test('cacheDir 复用镜头分片缓存，修改单镜台词或时长仅重编�
   assert.equal(exportPercents.at(-1), 100)
   assert.deepEqual((await readdir(cacheDir)).sort(), firstEntries)
   for (const name of firstEntries) {
-    const info = await lstat(path.join(cacheDir, name))
+    const info = await lstat(path.join(cacheDir, name, 'fragment.mov'))
     assert.equal(info.ino, firstStats.get(name).ino)
     assert.equal(info.mtimeMs, firstStats.get(name).mtimeMs)
   }
@@ -458,10 +458,10 @@ test('cacheDir 复用镜头分片缓存，修改单镜台词或时长仅重编�
   })
   const updatedEntries = (await readdir(cacheDir)).sort()
   assert.equal(updatedEntries.length, 3)
-  assert.ok(updatedEntries.every(name => /^[0-9a-f]{64}\.mov$/.test(name)))
+  assert.ok(updatedEntries.every(name => /^[0-9a-f]{64}$/.test(name)))
   for (const name of firstEntries) {
     assert.ok(updatedEntries.includes(name))
-    const info = await lstat(path.join(cacheDir, name))
+    const info = await lstat(path.join(cacheDir, name, 'fragment.mov'))
     assert.equal(info.ino, firstStats.get(name).ino)
     assert.equal(info.mtimeMs, firstStats.get(name).mtimeMs)
   }
@@ -502,4 +502,58 @@ test('cacheDir 命中缓存前校验源素材存在性，源文件被移除时�
     }),
     /镜头 2 · 素材文件不存在/,
   )
+})
+
+test('缓存识别同大小同时间戳的素材替换，并自动淘汰同大小的损坏分片', async context => {
+  const { execFileSync } = require('node:child_process')
+  const { store, episodeId, shotId } = await setup(context)
+  const target = { scope: 'shot', episodeId, shotId, kind: 'image' }
+  await store.importMedia(target, path.resolve('resources/sample/01.jpg'))
+  const project = store.snapshot
+  const episode = project.episodes[0]
+  const asset = await store.assetPath(episode.shots[0].media.image.versions[0])
+  const cacheDir = path.join(store.root, 'render-cache')
+  await require('node:fs/promises').mkdir(cacheDir)
+  const output = path.join(store.root, 'preview.mp4')
+  const render = () => renderEpisode(store, episode, output, {
+    signal: AbortSignal.timeout(25_000), project, cacheDir,
+  })
+  const pixels = () => execFileSync('ffmpeg', [
+    '-nostdin', '-v', 'error', '-i', output, '-frames:v', '1', '-vf', 'scale=16:9', '-f', 'rawvideo', '-',
+  ])
+  const before = await readFile(asset)
+  const alternate = await readFile(path.resolve('resources/sample/02.jpg'))
+  const size = Math.max(before.length, alternate.length)
+  const timestamp = new Date('2025-01-01T00:00:00Z')
+  const replace = async bytes => {
+    const padded = Buffer.alloc(size)
+    bytes.copy(padded)
+    await writeFile(asset, padded)
+    await utimes(asset, timestamp, timestamp)
+    const info = await lstat(asset)
+    return [info.size, info.mtimeMs]
+  }
+  const metadata = await replace(before)
+  await render()
+  const firstPixels = pixels()
+  const [firstKey] = await readdir(cacheDir)
+
+  assert.deepEqual(await replace(alternate), metadata)
+  await render()
+  const newPixels = pixels()
+  assert.notDeepEqual(newPixels, firstPixels)
+  const [newKey] = (await readdir(cacheDir)).filter(name => name !== firstKey)
+  assert.ok(newKey)
+  const fragment = path.join(cacheDir, newKey, 'fragment.mov')
+  const originalFragment = await readFile(fragment)
+  const corrupt = Buffer.from(originalFragment)
+  corrupt[Math.floor(corrupt.length / 2)] ^= 0xff
+  await writeFile(fragment, corrupt)
+  await render()
+  assert.deepEqual(pixels(), newPixels)
+  assert.deepEqual(await readFile(fragment), originalFragment)
+  const recovered = await lstat(fragment)
+  await render()
+  assert.equal((await lstat(fragment)).mtimeMs, recovered.mtimeMs)
+  assert.deepEqual((await readdir(cacheDir)).sort(), [firstKey, newKey].sort())
 })

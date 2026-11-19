@@ -46,7 +46,7 @@ const bridge: Workbench = {
   cleanOrphanMedia: key => ipcRenderer.invoke('media:clean-orphans', key),
   copy: text => ipcRenderer.invoke('app:copy', text),
   openTool: (key, tool) => ipcRenderer.invoke('app:open-tool', key, tool),
-  render: (key, episodeId, mode) => ipcRenderer.invoke('episode:render', key, episodeId, mode),
+  render: (key, episodeId, mode, rebuild) => ipcRenderer.invoke('episode:render', key, episodeId, mode, rebuild),
   cancelRender: () => ipcRenderer.invoke('episode:cancel'),
   onProgress: listener => {
     const handler = (_event: Electron.IpcRendererEvent, value: RenderProgress) => listener(value)

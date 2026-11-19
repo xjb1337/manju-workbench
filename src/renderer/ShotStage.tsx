@@ -27,6 +27,7 @@ export function ShotStage({
   playerOpen,
   onOpenEpisodeScript,
   onPreview,
+  onRebuildPreview,
   onExport,
   onAddPrimary,
   onMagpie,
@@ -50,6 +51,7 @@ export function ShotStage({
   playerOpen: boolean
   onOpenEpisodeScript: () => void
   onPreview: () => void
+  onRebuildPreview: () => void
   onExport: () => void
   onAddPrimary: () => void
   onMagpie: () => void
@@ -95,6 +97,7 @@ export function ShotStage({
       <div className="actions">
         <span className="export-size">{spec.width} × {spec.height}</span>
         <button disabled={!canRender} onClick={onPreview}><Play size={16} weight="fill" /> 顺序预览</button>
+        {shot && <button className="subtle" disabled={!canRender} onClick={onRebuildPreview}>重新生成预览</button>}
         <button className="primary" disabled={!canRender} onClick={onExport}><DownloadSimple size={18} /> 导出 MP4</button>
       </div>
     </div>
