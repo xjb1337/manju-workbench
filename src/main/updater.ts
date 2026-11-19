@@ -15,6 +15,8 @@ export type UpdateOptions = {
 }
 type Downloaded = { asset: PackageAsset; directory: string; file: string }
 
+export class InvalidUpdatePackageError extends Error {}
+
 async function isPe(file: FileHandle, size: number) {
   const dos = Buffer.alloc(64)
   if ((await file.read(dos, 0, dos.length, 0)).bytesRead !== dos.length || dos.toString('ascii', 0, 2) !== 'MZ') return false
@@ -187,7 +189,7 @@ export class Updater {
   async install(approve: () => Promise<boolean>) {
     this.#requireIdle()
     const ready = this.#ready
-    if (ready?.asset.kind !== 'setup') throw new Error('没有已校验的安装包')
+    if (ready?.asset.kind !== 'setup') throw new InvalidUpdatePackageError('没有已校验的安装包，请重新下载')
     this.#usingReady = true
     try {
       if (await this.#options.kind() !== 'setup') throw new Error('当前运行方式不支持启动安装程序')
@@ -198,9 +200,11 @@ export class Updater {
         }
         await verifyFile(ready.file, ready.asset)
       } catch (error) {
-        await this.#removeReady()
-        if (error instanceof Error && (error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('已下载的安装包不存在，请重新下载')
-        throw error
+        this.#ready = undefined
+        await rm(ready.directory, { recursive: true, force: true }).catch(() => {})
+        const reason = (error as NodeJS.ErrnoException).code === 'ENOENT' ? '已下载的安装包不存在'
+          : error instanceof Error ? error.message : '安装包校验失败'
+        throw new InvalidUpdatePackageError(`${reason}，请重新下载`, { cause: error })
       }
       await this.#options.launch(ready.file)
       this.#launched = true

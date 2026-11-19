@@ -7,27 +7,33 @@ import { pathToFileURL } from 'node:url'
 import { z } from 'zod'
 import type { OpenProject, RenderProgress, RenderResult, Reply } from '../shared/api'
 import { extensions, folderNameSchema, idSchema, mediaTargetSchema } from '../shared/model'
-import { frameSpec } from '../shared/creative'
+import { frameSpec, generationKindSchema, generationPresets, generationToolUrl } from '../shared/creative'
+import { magpieModelSchema, magpieScriptSchema } from '../shared/plan'
+import { magpiePlanningPrompt } from '../shared/prompts'
+import { generateMagpiePlan } from './magpie'
 import { mediaResponse } from './media-protocol'
 import { exportDestination, renderEpisode } from './render'
 import { fillSample, fillVerticalSample } from './sample'
+import { RecentProjects } from './recent-projects'
 import { allVersions, findEpisode, ProjectStore } from './storage'
 import { createProductionUpdater } from './update-system'
-import type { Updater } from './updater'
+import { InvalidUpdatePackageError, type Updater } from './updater'
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'manju-media', privileges: { standard: true, secure: true, stream: true } }])
 const html = path.join(__dirname, '../renderer/index.html')
 const rendererUrl = pathToFileURL(html).href
 const resources = path.join(app.getAppPath(), 'resources', 'sample')
-const urls = { chatgpt: 'https://chatgpt.com/', flow: 'https://labs.google/fx/tools/flow' }
+const toolSchema = z.union([generationKindSchema, z.literal('planning')])
 
 let window: BrowserWindow | null = null
 let current: { store: ProjectStore; key: string } | null = null
 let preview: { directory: string; file: string; id: string } | null = null
 let operation: Promise<unknown> | undefined
 let job: { controller: AbortController; publishing: boolean } | null = null
+let planGeneration: { key: unknown; controller: AbortController } | null = null
 let quitting = false
 let updater: Updater
+let recent: RecentProjects
 let editorDirty = false
 let confirmingInstall = false
 let installerStarted = false
@@ -57,6 +63,7 @@ function handle<T>(channel: string, fn: (win: BrowserWindow, ...args: unknown[])
       return { ok: true, value: await fn(win, ...args) }
     } catch (error) {
       console.error(channel, error)
+      if (error instanceof InvalidUpdatePackageError) return { ok: false, error: error.message, code: 'update-package-invalid' }
       return { ok: false, error: diagnose(error) }
     }
   })
@@ -78,8 +85,16 @@ async function dropPreview() {
 
 async function switchProject(store: ProjectStore | null): Promise<OpenProject | null> {
   await dropPreview()
-  current = store ? { store, key: randomUUID() } : null
-  return current && { project: current.store.snapshot, mediaKey: current.key, directory: current.store.root }
+  if (current) {
+    const { title, fictional } = current.store.snapshot
+    await recent.remember({ directory: current.store.root, title, fictional })
+  }
+  if (!store) { current = null; return null }
+  const project = store.snapshot
+  await recent.remember({ directory: store.root, title: project.title, fictional: project.fictional })
+  const key = randomUUID()
+  current = { store, key }
+  return { project, mediaKey: key, directory: store.root }
 }
 
 function getStore(key: unknown) {
@@ -124,7 +139,8 @@ function wire() {
   handle('project:create', (win, title, sample) => serial(async () => {
     const name = folderNameSchema.parse(title)
     const source = z.union([z.boolean(), z.literal('vertical')]).parse(sample)
-    const selected = await dialog.showOpenDialog(win, { title: '选择保存位置', properties: ['openDirectory', 'createDirectory'] })
+    const selected = await dialog.showOpenDialog(win, { title: '选择保存位置', properties: ['openDirectory', 'createDirectory'],
+      defaultPath: await recent.defaultDirectory('project') })
     if (selected.canceled || !selected.filePaths[0]) return null
     const store = await ProjectStore.create(selected.filePaths[0], name, !!source)
     try {
@@ -137,13 +153,44 @@ function wire() {
     }
   }))
   handle('project:open', win => serial(async () => {
-    const selected = await dialog.showOpenDialog(win, { title: '打开作品', properties: ['openDirectory'] })
+    const selected = await dialog.showOpenDialog(win, { title: '打开作品', properties: ['openDirectory'],
+      defaultPath: await recent.defaultDirectory('project') })
     if (selected.canceled || !selected.filePaths[0]) return null
     return switchProject(await ProjectStore.open(selected.filePaths[0]))
+  }))
+  handle('project:recent', () => recent.entries)
+  handle('project:open-recent', (_win, input) => serial(async () => {
+    const id = idSchema.parse(input)
+    const entry = recent.entries.find(item => item.id === id)
+    if (!entry) throw new Error('最近作品记录已失效，请使用「打开作品」重新选择')
+    return switchProject(await ProjectStore.open(entry.directory))
   }))
   handle('project:close', () => serial(async () => { await switchProject(null); return null }))
   handle('project:edit', (_win, key, change) => serial(() => getStore(key).edit(change)))
   handle('plan:preview', (_win, key, episode, input) => serial(() => getStore(key).previewPlan(episode, input)))
+  handle('plan:generate-magpie', (_win, key, episodeInput, modelInput, scriptInput) => serial(async () => {
+    const store = getStore(key)
+    const episodeId = idSchema.nullable().parse(episodeInput)
+    const model = magpieModelSchema.parse(modelInput)
+    const script = magpieScriptSchema.parse(scriptInput)
+    const project = store.snapshot
+    const episode = episodeId ? findEpisode(project, episodeId) : undefined
+    if (!episode && project.episodes.length) throw new Error('请先选择要生成分镜的集数')
+    const controller = new AbortController()
+    planGeneration = { key, controller }
+    try {
+      const draft = await generateMagpiePlan(model, magpiePlanningPrompt(project, episode, script), controller.signal)
+      if (!draft || controller.signal.aborted) return null
+      const staged = episode ? { shots: draft.shots } : { title: draft.title, shots: draft.shots, script }
+      return await store.previewPlan(episodeId, JSON.stringify({ schemaVersion: 1, episode: staged }), 'magpie')
+    } finally {
+      planGeneration = null
+    }
+  }))
+  handle('plan:cancel-generation', (_win, key) => {
+    if (planGeneration && planGeneration.key === key) planGeneration.controller.abort()
+    return null
+  })
   handle('plan:merge', (_win, key, token, replacements) => serial(() => getStore(key).mergePlan(token, replacements)))
   handle('project:import', (win, key, input) => serial(async () => {
     const store = getStore(key)
@@ -151,16 +198,22 @@ function wire() {
     const kind = target.scope === 'shot' ? target.kind : 'image'
     const label = { image: '参考图', video: '视频', audio: '配音' }[kind]
     const selected = await dialog.showOpenDialog(win, { title: `导入${label}`, properties: ['openFile'],
-      filters: [{ name: label, extensions: extensions[kind] }] })
+      defaultPath: await recent.defaultDirectory('media', store.root), filters: [{ name: label, extensions: extensions[kind] }] })
     if (selected.canceled || !selected.filePaths[0]) return null
-    return store.importMedia(target, selected.filePaths[0])
+    const project = await store.importMedia(target, selected.filePaths[0])
+    await recent.rememberMedia(selected.filePaths[0])
+    return project
   }))
   handle('app:copy', (_win, text) => {
     clipboard.writeText(z.string().max(64 * 1024 * 1024).parse(text))
     return null
   })
-  handle('app:open-tool', async (_win, tool) => {
-    await shell.openExternal(urls[z.enum(['chatgpt', 'flow']).parse(tool)])
+  handle('app:open-tool', async (_win, key, tool) => {
+    const project = getStore(key).snapshot
+    const kind = toolSchema.parse(tool)
+    const url = kind === 'planning' ? generationPresets.image.url : project.brief?.generation?.[kind]?.url
+    if (!url) throw new Error('请在制作简报中填写工具网址')
+    await shell.openExternal(new URL(generationToolUrl.parse(url)).href)
     return null
   })
   handle('episode:cancel', () => {
@@ -265,16 +318,18 @@ function createWindow() {
 
 if (app.requestSingleInstanceLock()) {
   app.on('second-instance', () => { window?.restore(); window?.focus() })
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
     Menu.setApplicationMenu(null)
     session.defaultSession.setPermissionCheckHandler(() => false)
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
     updater = createProductionUpdater()
+    recent = await RecentProjects.open(app.getPath('userData'))
     wire()
     createWindow()
   })
   app.on('window-all-closed', () => {
     quitting = true
+    planGeneration?.controller.abort()
     if (!job?.publishing) job?.controller.abort()
     void Promise.allSettled([Promise.resolve(operation).catch(() => {}).then(dropPreview), updater.dispose()])
       .finally(() => app.quit())

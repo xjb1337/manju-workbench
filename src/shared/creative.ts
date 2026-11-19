@@ -3,9 +3,9 @@ import type { MediaKind, Project, Shot } from './model'
 
 export const workTypeLabels = { story: '漫剧／故事', knowledge: '知识讲解', code: '代码视频', mixed: '混合' } as const
 export const methodLabels = {
-  flow: '生图 + Flow', image: '仅生图', 'flow-only': '仅 Flow（跳过生图）', code: '仅代码成片', imported: '仅导入成片',
+  flow: '生图 + 视频制作', image: '仅生图', 'flow-only': '仅视频制作', code: '仅代码成片', imported: '仅导入成片',
 } as const
-export const detailLabels = { image: '生图提示词', flow: 'Flow 视频提示词', code: '代码任务书', voice: '配音与字幕稿' } as const
+export const detailLabels = { image: '生图提示词', flow: '视频制作提示词', code: '代码任务书', voice: '配音与字幕稿' } as const
 export const workTypeSchema = z.enum(['story', 'knowledge', 'code', 'mixed'])
 export const methodSchema = z.enum(['flow', 'image', 'flow-only', 'code', 'imported'])
 export const detailKindSchema = z.enum(['image', 'flow', 'code', 'voice'])
@@ -14,6 +14,29 @@ export type WorkType = z.infer<typeof workTypeSchema>
 export type ShotMethod = z.infer<typeof methodSchema>
 export type DetailKind = z.infer<typeof detailKindSchema>
 export type Ratio = z.infer<typeof ratioSchema>
+
+export const generationKindSchema = z.enum(['image', 'video'])
+export type GenerationKind = z.infer<typeof generationKindSchema>
+export const generationLabels = { image: '生图', video: '视频制作' } as const
+export const generationToolUrl = z.string().trim().max(2048).refine(value => {
+  if (!value) return true
+  if (!/^https?:\/\//i.test(value) || /[\\\x00-\x1f\x7f]/.test(value)) return false
+  const url = URL.parse(value)
+  return !!url && !url.username && !url.password
+}, '请输入完整的 HTTP 或 HTTPS 网址，网址中不要包含账号或密码')
+const generationToolSchema = z.object({
+  name: z.string().trim().max(80, '工具名称最多 80 个字符').default(''),
+  url: generationToolUrl.default(''),
+})
+export type GenerationTool = z.infer<typeof generationToolSchema>
+export const generationPresets = {
+  image: { name: 'ChatGPT', url: 'https://chatgpt.com/' },
+  video: { name: 'Google Flow', url: 'https://labs.google/fx/tools/flow' },
+} satisfies Record<GenerationKind, GenerationTool>
+
+export function generationToolName(tool?: GenerationTool) {
+  return tool?.name || (tool?.url ? URL.parse(tool.url)?.hostname : undefined)
+}
 
 const shortText = z.string().trim().max(1000, '简报字段最多 1,000 个字符')
 export const briefSchema = z.object({
@@ -24,6 +47,7 @@ export const briefSchema = z.object({
   style: shortText.optional(),
   language: shortText.optional(),
   tools: shortText.optional(),
+  generation: z.partialRecord(generationKindSchema, generationToolSchema).optional(),
   terms: z.string().trim().max(5000, '术语表最多 5,000 个字符').optional(),
 })
 export type Brief = z.infer<typeof briefSchema>

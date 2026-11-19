@@ -51,7 +51,7 @@ export function ProductionGuide({ progress, step, episode, shot, busy, onStep, o
         return <button key={id} type="button" data-step={id} aria-pressed={step === id} disabled={busy} onClick={() => onStep(id)}>
           <span className="guide-label">{label}</span>
           <span className="guide-badges">
-            <span className={`badge guide-status ${status}`}>{id === 'code' && status === 'stale' ? '需更新' : statusLabels[status]}</span>
+            <span className={`badge guide-status ${status}`}>{id !== 'export' && status === 'stale' ? '需更新' : statusLabels[status]}</span>
             {progress.recommended === id && <span className="badge guide-next">建议下一步</span>}
           </span>
         </button>

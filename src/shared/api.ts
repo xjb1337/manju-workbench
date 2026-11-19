@@ -1,4 +1,5 @@
 import type { MediaTarget, Mutation, Project } from './model'
+import type { GenerationKind } from './creative'
 
 import type { PlanPreview } from './plan'
 
@@ -8,8 +9,9 @@ export interface OpenProject {
   directory: string
 }
 
-export type Reply<T> = { ok: true; value: T } | { ok: false; error: string }
-export type Tool = 'chatgpt' | 'flow'
+export type Reply<T> = { ok: true; value: T } | { ok: false; error: string; code?: 'update-package-invalid' }
+export type RecentProject = { id: string; title: string; directory: string; fictional: boolean }
+export type Tool = GenerationKind | 'planning'
 export type RenderProgress = { mode: 'preview' | 'export'; percent: number }
 export type RenderResult =
   | { status: 'canceled' }
@@ -26,14 +28,18 @@ export type UpdateProgress = { received: number; total: number }
 export type UpdateDownload = { status: 'canceled' } | { status: 'ready'; fileName: string }
 export interface Workbench {
   open(): Promise<Reply<OpenProject | null>>
+  recentProjects(): Promise<Reply<RecentProject[]>>
+  openRecent(id: string): Promise<Reply<OpenProject | null>>
   create(title: string, sample: boolean | 'vertical'): Promise<Reply<OpenProject | null>>
   close(): Promise<Reply<null>>
   edit(key: string, change: Mutation): Promise<Reply<Project>>
   previewPlan(key: string, episodeId: string | null, text: string): Promise<Reply<PlanPreview>>
+  generateMagpiePlan(key: string, episodeId: string | null, model: string, script: string): Promise<Reply<PlanPreview | null>>
+  cancelPlanGeneration(key: string): Promise<Reply<null>>
   mergePlan(key: string, token: string, replacements: string[]): Promise<Reply<Project>>
   importMedia(key: string, target: MediaTarget): Promise<Reply<Project | null>>
   copy(text: string): Promise<Reply<null>>
-  openTool(tool: Tool): Promise<Reply<null>>
+  openTool(key: string, tool: Tool): Promise<Reply<null>>
   render(key: string, episodeId: string, mode: RenderProgress['mode']): Promise<Reply<RenderResult>>
   cancelRender(): Promise<Reply<boolean>>
   onProgress(listener: (event: RenderProgress) => void): () => void

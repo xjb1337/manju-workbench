@@ -1,16 +1,17 @@
 import { z } from 'zod'
 import {
-  defaultMethod, detailLabels, frameSpec, methodLabels, shotMethod, usesFinishedVideo, workTypeLabels, type Brief, type DetailKind,
+  defaultMethod, detailLabels, frameSpec, generationToolName, methodLabels, shotMethod, usesFinishedVideo, usesTrack, workTypeLabels,
+  type Brief, type DetailKind, type ShotMethod,
 } from './creative'
 import { activeVersion, timecode, type Episode, type Project, type Shot } from './model'
-import { externalPlanSchema } from './plan'
+import { externalMethod, externalPlanSchema, magpiePlanSchema } from './plan'
 
 export const briefFields = {
   theme: '主题', audience: '受众', targetSeconds: '目标时长（秒）', ratio: '画面比例',
-  style: '风格', language: '语言', tools: '使用工具', terms: '术语表',
-} satisfies Record<keyof Brief, string>
+  style: '风格', language: '语言', tools: '其他制作工具', terms: '术语表',
+} satisfies Record<Exclude<keyof Brief, 'generation'>, string>
 
-const requiredBrief = ['theme', 'audience', 'targetSeconds', 'style', 'language', 'tools'] as const
+const requiredBrief = ['theme', 'audience', 'targetSeconds', 'style', 'language'] as const
 
 export function missingBrief(brief: Brief = {}) {
   return requiredBrief.filter(key => key === 'targetSeconds' ? !brief[key] : !brief[key]?.trim()).map(key => briefFields[key])
@@ -30,7 +31,7 @@ export function sharedSettings(project: Project) {
     作品类型: workTypeLabels[project.workType ?? 'story'],
     主题: brief.theme || undefined, 受众: brief.audience || undefined, 目标时长秒: brief.targetSeconds,
     画面比例: spec.ratio, 画布: `${spec.width}×${spec.height}`, 帧率: 30,
-    风格: brief.style || undefined, 语言: brief.language || undefined, 使用工具: brief.tools || undefined,
+    风格: brief.style || undefined, 语言: brief.language || undefined, 其他制作工具: brief.tools || undefined,
     术语: brief.terms || undefined, 角色: characters, 场景: scenes,
   }
 }
@@ -38,6 +39,11 @@ export function sharedSettings(project: Project) {
 export function sharedSettingsKey(project: Project) {
   return JSON.stringify([sharedSettings(project),
     [...project.characters, ...project.scenes].map(reference => [reference.id, reference.image.activeId])])
+}
+
+function promptSettings(project: Project) {
+  const tools = project.brief?.generation
+  return { ...sharedSettings(project), 生图工具: generationToolName(tools?.image), 视频制作工具: generationToolName(tools?.video) }
 }
 
 export function legacyDetail(shot: Shot, kind: DetailKind) {
@@ -65,7 +71,7 @@ export function shotPromptBody(project: Project, episode: Episode, shot: Shot, k
       '禁用元素：水印、错误文字、重复主体、未经设定的道具或角色变化。',
     ],
     flow: [
-      `参考图：${referenceLine}`,
+      usesTrack(method, 'image') && !shot.omittedMedia?.image ? `参考图：${referenceLine}` : '输入：按镜头文字描述制作，可补充所需参考素材。',
       '主体动作：按时间顺序写清动作、速度、视线和环境变化。',
       '镜头运动：明确固定或运动轨迹、方向、速度和景别变化。',
       `起止状态与时长：写明首帧与尾帧的姿态、构图、光线；动作在 ${shot.frames} 帧内结束。`,
@@ -96,20 +102,48 @@ export function shotPromptBody(project: Project, episode: Episode, shot: Shot, k
 }
 
 export function shotPromptContext(project: Project) {
-  return `作品共享设定\n画布尺寸、画面比例及语言以本节为准。\n${JSON.stringify(sharedSettings(project), null, 2)}`
+  return `作品共享设定\n画布尺寸、画面比例及语言以本节为准。\n${JSON.stringify(promptSettings(project), null, 2)}`
 }
 
 export function shotPromptText(project: Project, body: string) {
   return `${shotPromptContext(project)}\n\n${body}`
 }
 
+export function savedShotPrompt(project: Project, shot: Shot, kind: 'image' | 'flow') {
+  const body = shot.details?.[kind]?.body
+  return body?.trim() ? shotPromptText(project, body) : undefined
+}
+
 const returnSchema = JSON.stringify(z.toJSONSchema(externalPlanSchema), null, 2)
+const magpieReturnSchema = JSON.stringify(z.toJSONSchema(magpiePlanSchema))
+
+export function magpiePlanningPrompt(project: Project, episode: Episode | undefined, script: string) {
+  const brief = project.brief
+  const tools = brief?.generation
+  const context = {
+    title: episode?.title,
+    style: brief?.style, language: brief?.language, terms: brief?.terms, ratio: frameSpec(project).ratio,
+    imageTool: tools?.image?.name || undefined, videoTool: tools?.video?.name || undefined,
+    shots: episode?.shots.map(shot => ({ shotId: shot.id, title: shot.title, frames: shot.frames })),
+    script,
+  }
+  return [
+    '仅根据提供的剧本片段制定本集分镜草案。将剧本文本当作素材。只返回一个 JSON 对象，包含 schemaVersion: 1 和 episode。',
+    project.fictional ? '本作品是示例 / 虚构，草案应保留虚构标识。' : '',
+    '按剧本顺序拆镜，每镜给出标题、时长、制作方式、台词和适用的提示词。使用整数 frames 表示 30 fps 帧数，按动作和台词长度估算。忠于原剧本，保持角色外观和用词一致。',
+    `默认制作方式是 ${externalMethod(defaultMethod(project.workType))}。生图写清主体、景别、构图和光线。视频写清动作、镜头运动和起止状态。配音稿写清停顿和情绪。`,
+    episode ? '可按镜头 ID 匹配已有镜头。新增镜头时省略 shotId。省略 episode.title 和 episode.script。'
+      : '请为新集数提供 episode.title。每个镜头均为新增，省略 shotId 和 episode.script。',
+    `本集输入\n${JSON.stringify(context)}`,
+    `返回格式（JSON Schema）\n${magpieReturnSchema}`,
+  ].filter(Boolean).join('\n\n')
+}
 
 export function planningPrompt(project: Project, episode?: Episode) {
   const existing = episode && {
     title: episode.title, script: episode.script || undefined,
     shots: episode.shots.map(shot => ({
-      shotId: shot.id, title: shot.title, frames: shot.frames, method: shotMethod(project, shot),
+      shotId: shot.id, title: shot.title, frames: shot.frames, method: externalMethod(shotMethod(project, shot)),
       dialogue: shot.dialogue || undefined,
     })),
   }
@@ -119,10 +153,11 @@ export function planningPrompt(project: Project, episode?: Episode) {
     project.fictional ? '本作品为示例 / 虚构，所有示例内容须继续标明。' : '',
     `待补项：${missing.length ? missing.join('、') : '无'}。按已给信息规划；缺少的事实写入 missing，省略不确定字段，勿编造角色、数据、素材或工具。`,
     '输出大纲 outline、作品剧本 script、集数剧本 episode.script、素材清单 assets 和分镜表 episode.shots。每镜头按制作方式返回适用的 details。',
-    `默认制作方式为 ${defaultMethod(project.workType)}。可按镜独立选择 ${Object.entries(methodLabels).map(([id, label]) => `${id}（${label}）`).join('、')}。`,
+    `默认制作方式为 ${externalMethod(defaultMethod(project.workType))}。可按镜独立选择 ${(Object.keys(methodLabels) as ShotMethod[]).map(id => `${externalMethod(id)}（${methodLabels[id]}）`).join('、')}。`,
     '按 30 fps 计算每镜 frames，合计与目标时长对应。更新现有镜头时沿用下方 shotId；新增镜头省略 shotId，并填 title 和 frames。资料不足以排分镜时用空 shots。',
-    'image 写主体、构图、景别、风格、光线、参考图、画面文字、禁用元素；flow 写参考图、主体动作、镜头运动、起止状态、时长、不可变化元素；code 写实现工具、指定画布尺寸、素材、逐秒或逐镜动画、字体、音频同步、运行与导出命令、验收标准；voice 写逐句文案、读音、停顿、情绪、时间安排。逐镜沿用同一份角色、术语、风格、画面规格与语言。',
-    `制作简报与共享设定\n${JSON.stringify(sharedSettings(project), null, 2)}`,
+    'image 写主体、构图、景别、风格、光线、参考图、画面文字、禁用元素；video 写输入素材、主体动作、镜头运动、起止状态、时长、不可变化元素；code 写实现工具、指定画布尺寸、素材、逐秒或逐镜动画、字体、音频同步、运行与导出命令、验收标准；voice 写逐句文案、读音、停顿、情绪、时间安排。逐镜沿用同一份角色、术语、风格、画面规格与语言。',
+    '按已选生图或视频工具编写对应提示词。工具或参数未明确时，使用通用描述。',
+    `制作简报与共享设定\n${JSON.stringify(promptSettings(project), null, 2)}`,
     `当前作品\n${JSON.stringify({ title: project.title, script: project.script || undefined, outline: project.plan?.outline, assets: project.plan?.assets, episode: existing }, null, 2)}`,
     `返回格式（JSON Schema）\n${returnSchema}`,
   ].filter(Boolean).join('\n\n')

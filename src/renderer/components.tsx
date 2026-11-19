@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowDown, ArrowUp, Check, FilmStrip, Image as ImageIcon, MusicNote, Plus, Trash, UploadSimple } from '@phosphor-icons/react'
 import type { OpenProject } from '../shared/api'
-import { frameSpec, shotMethod } from '../shared/creative'
-import { activeVersion, shotMedia, timecode, type Episode, type MediaKind, type Track, type Version } from '../shared/model'
+import { frameSpec, shotMethod, type Ratio } from '../shared/creative'
+import { activeVersion, shotVisual, timecode, type Episode, type MediaKind, type Track, type Version } from '../shared/model'
 
 export const kindLabel: Record<MediaKind, string> = { image: '参考图', video: '视频', audio: '配音' }
 const kindIcon = { image: ImageIcon, video: FilmStrip, audio: MusicNote }
@@ -54,16 +54,15 @@ export function Timeline({ opened, episode, shotId, busy, onSelect, onAdd, onMov
     {!!episode.shots.length && <div className="filmstrip">
       {episode.shots.map((shot, position) => {
         const method = shotMethod(opened.project, shot)
-        const image = shotMedia(shot, 'image', method)
-        const video = shotMedia(shot, 'video', method)
+        const visual = shotVisual(shot, method)
         const from = start
         start += shot.frames
         return <button key={shot.id} className="clip" disabled={busy} aria-pressed={shot.id === shotId} onClick={() => onSelect(shot.id)}
           aria-label={`镜头 ${sequence(position)} ${shot.title}`}>
           <div className="clip-ruler">{timecode(from, true)}</div>
           <div className="clip-image" style={{ aspectRatio: `${spec.width} / ${spec.height}` }}>
-            {image ? <img src={mediaUrl(opened, image)} alt="" /> : video
-              ? <video src={mediaUrl(opened, video) + '#t=0.12'} preload="metadata" muted aria-hidden="true" />
+            {visual?.kind === 'image' ? <img src={mediaUrl(opened, visual.version)} alt="" /> : visual
+              ? <video src={mediaUrl(opened, visual.version)} preload="metadata" muted aria-hidden="true" />
               : <FilmStrip size={26} />}<b>{sequence(position)}</b></div>
           <div className="clip-meta"><strong>{shot.title}</strong><span>{timecode(shot.frames, true)}</span></div>
           <div className={`clip-state ${shot.status === '已通过' ? 'approved' : shot.status === '待审核' ? 'review' : 'idle'}`} title={shot.status} />
@@ -71,6 +70,57 @@ export function Timeline({ opened, episode, shotId, busy, onSelect, onAdd, onMov
       })}
     </div>}
   </section>
+}
+
+export function PreviewPlayer({ source, ratio, onError }: { source: string; ratio: Ratio; onError: () => void }) {
+  const frame = useRef<HTMLDivElement>(null)
+  const video = useRef<HTMLVideoElement>(null)
+  const [position, setPosition] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [playing, setPlaying] = useState(false)
+  const [muted, setMuted] = useState(false)
+  const [fullscreen, setFullscreen] = useState(false)
+  useEffect(() => {
+    const sync = () => setFullscreen(document.fullscreenElement === frame.current)
+    document.addEventListener('fullscreenchange', sync)
+    return () => document.removeEventListener('fullscreenchange', sync)
+  }, [])
+
+  const formatTime = (seconds: number) => timecode(Math.floor(seconds * 30))
+  return <div className="preview-frame" ref={frame}>
+    <video className="episode-player" data-ratio={ratio} src={source} ref={video} autoPlay onError={onError}
+      onLoadedMetadata={event => {
+        const length = event.currentTarget.duration
+        if (Number.isFinite(length)) setDuration(length)
+      }}
+      onTimeUpdate={event => setPosition(event.currentTarget.currentTime)}
+      onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} />
+    <div className="preview-controls" role="group" aria-label="预览播放控制">
+      <input type="range" aria-label="播放进度" aria-valuetext={formatTime(position)}
+        min={0} max={duration} step="any" value={Math.min(position, duration)} disabled={!duration}
+        onChange={event => {
+          if (video.current) video.current.currentTime = event.currentTarget.valueAsNumber
+          setPosition(event.currentTarget.valueAsNumber)
+        }} />
+      <div className="preview-buttons">
+        <button className="small" disabled={!duration} onClick={() => {
+          const element = video.current
+          if (!element) return
+          if (element.paused) void element.play().catch(onError)
+          else element.pause()
+        }}>{playing ? '暂停' : '播放'}</button>
+        <span className="preview-time">{formatTime(position)} / {formatTime(duration)}</span>
+        <button className="small" disabled={!duration} onClick={() => {
+          if (video.current) video.current.muted = !muted
+          setMuted(!muted)
+        }}>{muted ? '取消静音' : '静音'}</button>
+        <button className="small" disabled={!duration || !document.fullscreenEnabled} onClick={() => {
+          const action = fullscreen ? document.exitFullscreen() : frame.current?.requestFullscreen()
+          void action?.catch(() => {})
+        }}>{fullscreen ? '退出全屏' : '全屏'}</button>
+      </div>
+    </div>
+  </div>
 }
 
 export function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {

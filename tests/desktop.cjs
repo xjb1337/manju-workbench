@@ -5,9 +5,13 @@ const { copyFile, mkdir, mkdtemp, readFile, rename, stat, writeFile, readdir } =
 const { tmpdir } = require('node:os')
 const path = require('node:path')
 const { _electron: electron } = require('playwright')
-const { notes: updateNotes, releaseFixture, startUpdateFixture } = require('./update-fixture.cjs')
+const { notes: updateNotes, futureVersion, releaseFixture, startUpdateFixture } = require('./update-fixture.cjs')
 
 const version = require('../package.json').version
+const toolExamples = {
+  image: { name: '示例生图服务', url: 'https://image.example.test/generate' },
+  video: { name: '本地视频工具', url: 'http://127.0.0.1:8188/' },
+}
 const repository = path.resolve(__dirname, '..')
 const run = path.resolve(process.env.MANJU_RUN_DIR ?? path.join(tmpdir(), 'manju-workbench'))
 const screenshots = path.join(run, 'screenshots')
@@ -53,12 +57,17 @@ async function launch(profile, entry = repository, env = process.env) {
   const page = await app.firstWindow()
   page.setDefaultTimeout(15_000)
   page.on('pageerror', error => console.error('Renderer error:', error))
-  await app.evaluate(({ dialog, shell }) => {
+  await app.evaluate(({ clipboard, dialog, shell }) => {
     globalThis.openChoices = []
+    globalThis.openDefaults = []
     globalThis.saveChoices = []
     globalThis.openedUrls = []
-    dialog.showOpenDialog = async () => {
+    let copiedText = ''
+    clipboard.writeText = text => { copiedText = text }
+    clipboard.readText = () => copiedText
+    dialog.showOpenDialog = async (_window, options) => {
       if (!globalThis.openChoices.length) throw new Error('Unexpected open dialog')
+      globalThis.openDefaults.push(options.defaultPath)
       const file = globalThis.openChoices.shift()
       return { canceled: !file, filePaths: file ? [file] : [] }
     }
@@ -108,6 +117,65 @@ async function addAsset(app, page, label, input, scope = page) {
   await footerSaved(page)
 }
 
+async function verifyMagpieDraft(app, page, file, first) {
+  const before = await documentAt(file)
+  await app.evaluate((_electron, shotId) => {
+    const original = globalThis.fetch
+    globalThis.restoreMagpieFetch = () => { globalThis.fetch = original }
+    globalThis.magpieRequests = []
+    globalThis.magpieMode = 'pending'
+    globalThis.fetch = async (url, init) => {
+      if (url !== 'http://127.0.0.1:3425/v1/chat/completions') return original(url, init)
+      globalThis.magpieRequests.push(JSON.parse(init.body))
+      if (globalThis.magpieMode === 'pending') return new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true })
+      })
+      if (globalThis.magpieMode === 'limited') return new Response(null, { status: 429 })
+      const plan = {
+        schemaVersion: 1, title: '作品级标题提议',
+        episode: { title: '集数标题提议', script: '集数剧本提议', shots: [{ shotId, title: '虚构试验镜头' }] },
+      }
+      return Response.json({ choices: [{ finish_reason: 'stop', message: { content: '```json\n' + JSON.stringify(plan) + '\n```' } }] })
+    }
+  }, first.id)
+  try {
+    await button(stage(page), 'AI 生成分镜草案').click()
+    const dialog = page.getByRole('dialog', { name: 'AI 生成分镜草案', exact: true })
+    const script = '虚构剧本片段：画面出现一束信号。'
+    assert.equal(await dialog.getByLabel('Magpie 模型 ID').inputValue(), 'group/never-stuck')
+    await dialog.getByLabel('剧本文本').fill(script)
+    await button(dialog, '生成草案').click()
+    await dialog.getByRole('status').getByText(/正在等待/).waitFor()
+    await button(dialog, '停止等待').click()
+    await dialog.getByRole('status').getByText('已停止等待').waitFor()
+    assert.deepEqual(await documentAt(file), before)
+
+    await app.evaluate(() => { globalThis.magpieMode = 'limited' })
+    await button(dialog, '生成草案').click()
+    await dialog.getByRole('alert').getByText(/HTTP 429/).waitFor()
+    assert.deepEqual(await documentAt(file), before)
+
+    await app.evaluate(() => { globalThis.magpieMode = 'success' })
+    await dialog.getByLabel('Magpie 模型 ID').fill('provider/other-text-model')
+    await button(dialog, '生成草案').click()
+    const preview = page.getByRole('dialog', { name: 'AI 分镜草案预览', exact: true })
+    await preview.getByText('虚构试验镜头', { exact: true }).waitFor()
+    assert.equal(await preview.locator('.diff-row').count(), 1)
+    assert.equal(await preview.getByRole('combobox').inputValue(), 'keep')
+    assert.equal(await button(preview, '确认合并').isDisabled(), true)
+    assert.deepEqual(await documentAt(file), before)
+    await button(preview, '返回编辑').click()
+    assert.equal(await dialog.getByLabel('剧本文本').inputValue(), script)
+    assert.equal(await dialog.getByLabel('Magpie 模型 ID').inputValue(), 'provider/other-text-model')
+    const request = await app.evaluate(() => globalThis.magpieRequests.at(-1))
+    assert.equal(request.model, 'provider/other-text-model')
+    assert.match(request.messages[0].content, /虚构剧本片段/)
+    await button(dialog, '取消').click()
+  } finally {
+    await app.evaluate(() => globalThis.restoreMagpieFetch())
+  }
+}
+
 async function verifyUpdates(folder, project) {
   const fixture = releaseFixture()
   const temp = path.join(folder, '更新临时目录')
@@ -144,7 +212,7 @@ async function verifyUpdates(folder, project) {
     Object.assign(server.state, { releases: [fixture.release], paths: fixture.paths, stalledPath: fixture.assetPath })
     async function checkNewVersion() {
       await button(page, '检查更新').click()
-      await panel.getByText('发现新版本 1.2.0', { exact: true }).waitFor()
+      await panel.getByText(`发现新版本 ${futureVersion}`, { exact: true }).waitFor()
       assert.equal(await panel.locator('.update-notes p').textContent(), updateNotes)
       assert.equal(await panel.locator('.update-notes p strong').count(), 0)
       await panel.getByText('应用未签名。SHA-256 仅验证文件完整性，无法证明发布者身份。', { exact: true }).waitFor()
@@ -199,6 +267,16 @@ async function verifyUpdates(folder, project) {
     await script.fill(before)
     await footerSaved(page)
     await guide(page).waitFor()
+    const [packageDirectory] = await readdir(temp)
+    await rename(path.join(temp, packageDirectory, fixture.fileName), path.join(folder, '移走的测试更新包.exe'))
+    await app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1 }) })
+    await button(page, '检查更新').click()
+    await button(panel, '安装').click()
+    await panel.getByRole('alert').getByText('已下载的安装包不存在，请重新下载', { exact: true }).waitFor()
+    assert.equal(await button(panel, '安装').isEnabled(), false)
+    await button(panel, '下载').click()
+    await panel.getByText('已通过完整性校验', { exact: false }).waitFor()
+    assert.deepEqual(await app.evaluate(() => globalThis.updateLaunches), [])
     console.log('更新夹具验收通过：无后台检查，暂无发布，发现新版本，纯文本说明，下载取消及校验，安装确认取消，未保存修改保护')
   } catch (error) {
     await desktop?.page.screenshot({ path: path.join(folder, 'diagnostic-update-failure.png'), timeout: 3000 }).catch(() => {})
@@ -211,12 +289,40 @@ async function verifyUpdates(folder, project) {
 
 async function verifyGuideTools(app, page) {
   await selectStep(page, 'image')
+  await button(guide(page), '设置生图工具').click()
+  const imageName = page.getByLabel('生图工具名称', { exact: true })
+  const imageUrl = page.getByLabel('生图工具网址', { exact: true })
+  assert.equal(await imageName.evaluate(field => field === document.activeElement), true)
+  await button(stage(page), '使用 ChatGPT').click()
+  assert.equal(await imageUrl.inputValue(), 'https://chatgpt.com/')
+  await imageName.fill(toolExamples.image.name)
+  await imageUrl.fill('file:///C:/example.html')
+  await button(stage(page), '保存简报').click()
+  await page.getByRole('alert').getByText(/请输入完整的 HTTP 或 HTTPS 网址/).waitFor()
+  await imageUrl.fill(toolExamples.image.url)
+  await page.getByLabel('视频制作工具名称').fill(toolExamples.video.name)
+  await button(stage(page), '保存简报').click()
+  await footerSaved(page)
+  assert.deepEqual(await app.evaluate(() => globalThis.openedUrls), [])
+  await selectStep(page, 'video')
+  await button(guide(page), '设置视频制作工具').click()
+  const videoName = page.getByLabel('视频制作工具名称')
+  const videoUrl = page.getByLabel('视频制作工具网址')
+  assert.equal(await videoName.evaluate(field => field === document.activeElement), true)
+  assert.equal(await videoName.inputValue(), toolExamples.video.name)
+  assert.equal(await videoUrl.inputValue(), '')
+  assert.deepEqual(await app.evaluate(() => globalThis.openedUrls), [])
+  await videoUrl.fill(toolExamples.video.url)
+  await button(stage(page), '保存简报').click()
+  await footerSaved(page)
+  await screenshot(page, 'generation-tools.png')
+  await selectStep(page, 'image')
   await button(guide(page), '编辑提示词').click()
   assert.equal(await page.locator('#shot-prompt').evaluate(field => field === document.activeElement), true)
   await button(guide(page), '复制生图提示词').click()
   await page.getByText('提示词已复制', { exact: true }).waitFor()
   assert.equal(await app.evaluate(({ clipboard }) => clipboard.readText()), shotPlan[0][3])
-  await button(guide(page), '打开 ChatGPT').click()
+  await button(guide(page), `打开 ${toolExamples.image.name}`).click()
   await footerSaved(page)
   await guideStatus(page, 'image', '待完成')
 
@@ -231,10 +337,10 @@ async function verifyGuideTools(app, page) {
   await button(guide(page), '复制视频提示词').click()
   await page.getByText('提示词已复制', { exact: true }).waitFor()
   assert.equal(await app.evaluate(({ clipboard }) => clipboard.readText()), '镜头缓慢推进，保持灯塔在画面中。')
-  await button(guide(page), '打开 Google Flow').click()
+  await button(guide(page), `打开 ${toolExamples.video.name}`).click()
   await footerSaved(page)
   await guideStatus(page, 'video', '待完成')
-  assert.deepEqual(await app.evaluate(() => globalThis.openedUrls), ['https://chatgpt.com/', 'https://labs.google/fx/tools/flow'])
+  assert.deepEqual(await app.evaluate(() => globalThis.openedUrls), [toolExamples.image.url, toolExamples.video.url])
 }
 
 function toneAmplitude(wav, at, frequency, duration = .4) {
@@ -356,7 +462,7 @@ async function verifyCreative(folder, parent, profile) {
     await page.getByLabel('受众').fill('动态图形入门观众')
     await page.getByLabel('风格', { exact: true }).fill('深蓝网格、青绿脉冲、细线图表')
     await page.getByLabel('术语表').fill('脉冲：观测值的短时升高。')
-    await page.getByLabel('目标时长（秒）').fill('6.25')
+    await page.getByLabel('目标时长（秒）').fill('6.250')
     await page.getByLabel('画面比例').selectOption('16:9')
     await page.getByLabel('画面比例').selectOption('9:16')
     await button(stage(page), '保存简报').click()
@@ -379,6 +485,7 @@ async function verifyCreative(folder, parent, profile) {
     assert.ok(total.includes(first.id))
     await screenshot(page, 'creative-03-planning-prompt.png')
     await button(planner, '关闭').click()
+    await verifyMagpieDraft(app, page, file, first)
 
     const before = await documentAt(file)
     await button(stage(page), '导入外部规划').click()
@@ -445,7 +552,14 @@ async function verifyCreative(folder, parent, profile) {
     await screenshot(page, 'creative-05-code-task.png')
     await button(task, '关闭').click()
     await guideStatus(page, 'code', '已完成')
+    await guideStatus(page, 'finished', '需更新')
+    for (const [index, savedShot] of merged.episodes[0].shots.entries()) {
+      await button(page, `镜头 0${index + 1} ${savedShot.title}`).click()
+      await button(page, '保留此版本 · 视频').click()
+      await footerSaved(page)
+    }
     await guideStatus(page, 'finished', '已完成')
+    await button(page, `镜头 01 ${first.title}`).click()
 
     const monitorVideo = page.locator('.monitor-body video')
     await monitorVideo.waitFor()
@@ -480,6 +594,9 @@ async function verifyCreative(folder, parent, profile) {
     const player = page.locator('video.episode-player')
     await player.waitFor({ timeout: 45_000 })
     await page.waitForFunction(() => document.querySelector('.episode-player')?.readyState >= 2)
+    const videoBox = await player.boundingBox()
+    const controlBox = await page.getByRole('group', { name: '预览播放控制' }).boundingBox()
+    assert.ok(videoBox.y + videoBox.height <= controlBox.y)
     const measured = await player.evaluate(video => {
       video.currentTime = 1.7
       video.pause()
@@ -594,11 +711,21 @@ async function main() {
     await button(page, '关闭预览').click()
     await guideStatus(page, 'export', '待完成')
     assert.deepEqual(await documentAt(sampleFile), sample)
+    await button(stage(page), '导出 MP4').click()
+    const fallback = page.getByRole('dialog', { name: '确认导出替代画面' })
+    await fallback.waitFor()
+    assert.equal(await fallback.getByText('静态参考图', { exact: true }).count(), 4)
+    await button(fallback, '返回补素材').click()
+    assert.deepEqual(await documentAt(sampleFile), sample)
     await button(page, '关闭作品').click()
     await page.locator('.welcome-card').waitFor()
+    await page.locator('.recent-projects').getByRole('button', { name: /雾港来信/ }).click()
+    await guide(page).waitFor()
+    await button(page, '关闭作品').click()
 
     await choose(app, parent)
     await named(page, '新建作品', projectTitle, '选择保存位置')
+    assert.equal(await app.evaluate(() => globalThis.openDefaults.at(-1)), parent)
     assert.deepEqual(await guide(page).locator('[data-step]').evaluateAll(steps => steps.map(step => step.dataset.step)),
       ['script', 'references', 'shots', 'image', 'video', 'audio', 'export'])
     for (const step of ['script', 'references', 'shots', 'image', 'video', 'audio', 'export']) await guideStatus(page, step, '待完成')
@@ -683,6 +810,7 @@ async function main() {
     await button(page, '镜头 02 一封来信').click()
     await addAsset(app, page, '视频', inputs.replacement)
     const after = await documentAt(projectFile)
+    assert.equal(await app.evaluate(() => globalThis.openDefaults.at(-1)), base)
     const original = before.episodes[0].shots
     const revised = after.episodes[0].shots
     for (const index of [0, 2, 3]) assert.deepEqual(revised[index], original[index])
@@ -702,12 +830,30 @@ async function main() {
     await button(page, '复制提示词').click()
     await page.getByText('提示词已复制', { exact: true }).waitFor()
     assert.equal(await app.evaluate(({ clipboard }) => clipboard.readText()), shotPlan[1][3])
-    await button(page, 'ChatGPT').click()
+    await page.locator('.shot-details button').filter({ hasText: '生图提示词' }).click()
+    const detailed = page.getByRole('dialog', { name: /生图提示词/ })
+    const newPrompt = '使用新版虚构灯塔构图'
+    await detailed.getByLabel('提示词正文').fill(newPrompt)
+    await button(detailed, '保存提示词').click()
+    await detailed.getByRole('status').getByText('已保存').waitFor()
+    await button(detailed, '复制生图提示词').click()
+    await detailed.getByRole('status').getByText('已复制').waitFor()
+    const detailedCopy = await app.evaluate(({ clipboard }) => clipboard.readText())
+    assert.ok(detailedCopy.endsWith(newPrompt))
+    assert.ok(detailedCopy.includes(toolExamples.image.name))
+    assert.ok(!detailedCopy.includes(toolExamples.image.url))
+    await button(detailed, '关闭').click()
+    await button(page, '复制详细提示词').click()
+    await page.getByText('提示词已复制', { exact: true }).waitFor()
+    assert.equal(await app.evaluate(({ clipboard }) => clipboard.readText()), detailedCopy)
+    assert.ok(await page.locator('.monitor-body video').count())
+    assert.ok(await page.locator('.clip-image video').count())
+    await button(page, toolExamples.image.name).click()
     await footerSaved(page)
-    await button(page, 'Google Flow').click()
+    await button(page, toolExamples.video.name).click()
     await footerSaved(page)
     assert.deepEqual(await app.evaluate(() => globalThis.openedUrls), [
-      'https://chatgpt.com/', 'https://labs.google/fx/tools/flow', 'https://chatgpt.com/', 'https://labs.google/fx/tools/flow',
+      toolExamples.image.url, toolExamples.video.url, toolExamples.image.url, toolExamples.video.url,
     ])
 
     await button(directory(page), '剧本').click()
@@ -720,6 +866,15 @@ async function main() {
     await stage(page).getByRole('heading', { name: '场景参考', exact: true }).waitFor()
     await named(page, '新建参考', '港口灯塔', '新建', guide(page))
     await addAsset(app, page, '参考图', inputs.files[2].image, guide(page))
+    for (const step of ['image', 'video', 'audio']) await guideStatus(page, step, '需更新')
+    await selectStep(page, 'shots')
+    for (const [index, [title]] of shotPlan.entries()) {
+      await button(page, `镜头 0${index + 1} ${title}`).click()
+      for (const kind of ['参考图', '视频', '配音']) {
+        await button(page, `保留此版本 · ${kind}`).click()
+        await footerSaved(page)
+      }
+    }
     for (const step of ['script', 'references', 'shots', 'image', 'video', 'audio']) await guideStatus(page, step, '已完成')
     await guideNext(page, 'export')
     await screenshot(page, '05-scene-reference.png')
@@ -748,7 +903,10 @@ async function main() {
     await button(page, '镜头 02 一封来信').click()
     assert.equal(await page.getByLabel('视频活动版本').inputValue(), track.versions[1].id)
     assert.deepEqual(await documentAt(projectFile), saved)
-    await page.locator('.monitor-body img').evaluate(image => image.decode())
+    assert.deepEqual(saved.brief.generation, toolExamples)
+    const activeMonitor = page.locator('.monitor-body video')
+    assert.ok((await activeMonitor.getAttribute('src')).endsWith(track.versions[1].id))
+    await page.waitForFunction(() => document.querySelector('.monitor-body video')?.readyState >= 1)
 
     await button(page, '顺序预览').click()
     const player = page.locator('video.episode-player')
@@ -814,12 +972,14 @@ async function main() {
     await reopenedVersion.selectOption(track.versions[0].id)
     await footerSaved(page)
     await guideStatus(page, 'export', '已过期')
-    await guideNext(page, 'export')
+    await guideStatus(page, 'video', '需更新')
+    await guideNext(page, 'video')
     await guide(page).getByText('需重新导出', { exact: true }).waitFor()
     assert.equal(await hash(destination), sha)
     await reopenedVersion.selectOption(track.versions[1].id)
     await footerSaved(page)
     await guideStatus(page, 'export', '已过期')
+    await guideNext(page, 'export')
 
     await named(page, '新建集数', '第 2 集', '新建', page.locator('.sidebar'))
     await guideStatus(page, 'export', '待完成')
@@ -851,6 +1011,8 @@ async function main() {
     const silent = path.join(project, '静默 成片.mp4')
     await choose(app, silent, 'saveChoices')
     await button(guide(page), '导出 MP4').click()
+    await page.getByRole('dialog', { name: '确认导出替代画面' }).getByText('黑底', { exact: true }).waitFor()
+    await button(page, '继续导出').click()
     await page.getByText(/导出完成/).waitFor({ timeout: 45_000 })
     await guideStatus(page, 'export', '已完成')
     const silentWav = ffmpeg('-i', silent, '-vn', '-ac', '1', '-f', 's16le', '-')
@@ -865,8 +1027,7 @@ async function main() {
     await app.close()
     desktop = await launch(profile)
     ;({ app, page } = desktop)
-    await choose(app, project)
-    await button(page, '打开作品').first().click()
+    await page.locator('.recent-projects').getByRole('button', { name: new RegExp(projectTitle) }).click()
     await guideStatus(page, 'export', '已过期')
     await page.getByRole('navigation', { name: '集数', exact: true }).getByRole('button', { name: /第 2 集/ }).click()
     await guideStatus(page, 'export', '已完成')
@@ -885,6 +1046,7 @@ async function main() {
       guidePerEpisodeAndStaleAfterRestart: true, skippedVideoAndAudioRetainCaptions: true,
       updateFixtureNoReleaseAndNewVersion: true, updateFixtureCanceledAndVerified: true,
       updateFixtureNativeConfirmationCanceledAndDirtyBlocked: true,
+      magpieDraftCancellationErrorAndConflictReview: true,
     }, null, 2))
     await writeFile(path.join(verify, 'latest-success.txt'), folder + '\n')
     console.log('已有 MP4 保留，取消对话框 / 编码中取消 / 第四镜缺源三条路径 SHA-256 一致：', sha)

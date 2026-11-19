@@ -4,7 +4,7 @@ const { tmpdir } = require('node:os')
 const path = require('node:path')
 const { test } = require('node:test')
 const { Updater } = require('../dist/main/updater')
-const { releasesPath, notes, sha256, executableFixture, releaseFixture, loopbackRequest, atUrl, startUpdateFixture } = require('./update-fixture.cjs')
+const { releasesPath, notes, futureVersion, sha256, executableFixture, releaseFixture, loopbackRequest, atUrl, startUpdateFixture } = require('./update-fixture.cjs')
 
 const version = require('../package.json').version
 const zip = Buffer.from('UEsDBBQAAAAAAOCDcl3uQOUFBwAAAAcAAAALAAAAZXhhbXBsZS50eHRmaXh0dXJlUEsBAhQDFAAAAAAA4INyXe5A5QUHAAAABwAAAAsAAAAAAAAAAAAAAIABAAAAAGV4YW1wbGUudHh0UEsFBgAAAAABAAEAOQAAADAAAAAAAA==', 'base64')
@@ -48,15 +48,17 @@ test('当前版本与正式发布相同或更高时显示已是最新版本', as
 })
 
 test('按数字比较版本，忽略 draft 和 prerelease 并显示正式发布的原文', async t => {
-  const first = releaseFixture({ version: '1.9.0' })
-  const highest = releaseFixture({ version: '1.10.0' })
+  const nextMajor = Number(version.split('.')[0]) + 1
+  const highestVersion = `${nextMajor}.10.0`
+  const first = releaseFixture({ version: `${nextMajor}.9.0` })
+  const highest = releaseFixture({ version: highestVersion })
   const ignored = [{ ...first.release, tag_name: 'v3.0.0', draft: true },
     { ...first.release, tag_name: 'v4.0.0-beta.1', prerelease: true }]
   const empty = await service(t, { releases: ignored })
   assert.equal((await empty.updater.check()).status, 'none')
   const { updater } = await service(t, { releases: [...ignored, first.release, highest.release] })
   assert.deepEqual(await updater.check(), {
-    currentVersion: version, status: 'available', version: '1.10.0', notes, kind: 'setup', unavailable: undefined,
+    currentVersion: version, status: 'available', version: highestVersion, notes, kind: 'setup', unavailable: undefined,
   })
 })
 
@@ -64,7 +66,7 @@ test('正式发布可以出现在后续分页', async t => {
   const fixture = releaseFixture()
   const { updater, urls } = await service(t, { request: async url => Response.json(url.searchParams.get('page') === '1'
     ? Array.from({ length: 100 }, () => ({ ...fixture.release, prerelease: true })) : [fixture.release]) })
-  assert.equal((await updater.check()).version, '1.2.0')
+  assert.equal((await updater.check()).version, futureVersion)
   assert.equal(urls.length, 2)
 })
 
@@ -213,7 +215,7 @@ test('安装确认后重新校验，下载后的篡改阻止执行', async t => 
 
 test('便携 EXE 和 ZIP 均可校验和打开目录，均不可启动安装器', async t => {
   for (const fixture of [releaseFixture({ kind: 'portable' }),
-    releaseFixture({ kind: 'portable', fileName: 'Manju-Workbench-1.2.0-x64-Portable.zip', bytes: zip })]) {
+    releaseFixture({ kind: 'portable', fileName: `Manju-Workbench-${futureVersion}-x64-Portable.zip`, bytes: zip })]) {
     const { updater, launched } = await service(t, { fixture, kind: 'portable' })
     assert.equal((await updater.check()).kind, 'portable')
     await updater.download(() => {})

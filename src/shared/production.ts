@@ -1,12 +1,12 @@
 import { shotMethod, usesFinishedVideo, usesTrack } from './creative'
-import { activeVersion, kinds, shotMedia, type Episode, type MediaKind, type Project, type Shot } from './model'
+import { activeVersion, kinds, shotMedia, shotVisual, type Episode, type MediaKind, type Project, type Shot } from './model'
 
 export const productionSteps = [
   { id: 'script', label: '剧本' },
   { id: 'references', label: '角色与场景' },
   { id: 'shots', label: '分镜' },
-  { id: 'image', label: 'ChatGPT 生图' },
-  { id: 'video', label: 'Flow 视频' },
+  { id: 'image', label: '生图' },
+  { id: 'video', label: '视频制作' },
   { id: 'audio', label: '配音字幕' },
   { id: 'export', label: '导出' },
 ] as const
@@ -24,10 +24,10 @@ export function productionProgress(project: Project, episodeId?: string) {
   const showReferences = (project.workType ?? 'story') === 'story'
     || (project.workType === 'mixed' && available.some(method => !usesFinishedVideo(method)))
   const showImage = available.some(method => usesTrack(method, 'image'))
-  const showFlow = available.some(method => method === 'flow' || method === 'flow-only')
+  const showVideo = available.some(method => usesTrack(method, 'video') && !usesFinishedVideo(method))
   const steps = [
     productionSteps[0], ...(showReferences ? [productionSteps[1]] : []), productionSteps[2],
-    ...(showImage ? [productionSteps[3]] : []), ...(showFlow ? [productionSteps[4]] : []),
+    ...(showImage ? [productionSteps[3]] : []), ...(showVideo ? [productionSteps[4]] : []),
     ...(available.includes('code') ? [codeStep] : []), ...(available.some(usesFinishedVideo) ? [finishedStep] : []),
     productionSteps[5], productionSteps[6],
   ]
@@ -38,15 +38,15 @@ export function productionProgress(project: Project, episodeId?: string) {
     const omitted = items.filter(item => item.state === 'omitted').length
     const stale = items.filter(item => item.state === 'stale').length
     const ready = items.length - missing - omitted - stale
-    const status: StepStatus = !items.length ? 'incomplete'
-      : !missing ? 'complete' : ready + omitted + stale ? 'partial' : 'incomplete'
+    const status: StepStatus = stale ? 'stale' : !items.length ? 'incomplete'
+      : !missing ? 'complete' : ready + omitted ? 'partial' : 'incomplete'
     return { items, missing, omitted, ready, stale, status }
   }
   const mediaState = (shot: Shot, kind: MediaKind) => {
     if (shot.omittedMedia?.[kind]) return 'omitted'
     const method = shotMethod(project, shot)
-    const version = activeVersion(shot.media[kind]) ??
-      (kind === 'audio' && usesFinishedVideo(method) ? shotMedia(shot, 'video', method) : undefined)
+    const video = kind === 'audio' && usesFinishedVideo(method) ? shotMedia(shot, 'video', method) : undefined
+    const version = activeVersion(shot.media[kind]) ?? (video?.hasAudio ? video : undefined)
     return version?.needsUpdate ? 'stale' : version ? 'ready' : 'missing'
   }
   const media = {
@@ -69,12 +69,24 @@ export function productionProgress(project: Project, episodeId?: string) {
     video: media.video.status,
     audio: media.audio.status,
     finished: media.finished.status,
-    code: media.code.stale ? 'stale' : media.code.status,
+    code: media.code.status,
     export: episode?.exportRecord ? episode.exportRecord.stale ? 'stale' : 'complete' : 'incomplete',
   }
   const statuses = Object.fromEntries(steps.map(({ id }) => [id, allStatuses[id]])) as Partial<Record<StepId, StepStatus>>
   const recommended = steps.find(({ id }) => statuses[id] !== 'complete')?.id
   return { steps, statuses, recommended, missingReferences, media, dialogueCount: shots.filter(shot => shot.dialogue.trim()).length }
+}
+
+export function exportFallbacks(project: Pick<Project, 'workType'>, episode: Episode) {
+  return episode.shots.flatMap((shot, index) => {
+    const method = shotMethod(project, shot)
+    const visual = shotVisual(shot, method)
+    if (!visual) return [{ index, title: shot.title, label: '黑底' }]
+    if (visual.kind === 'image' && usesTrack(method, 'video') && !shot.omittedMedia?.video) {
+      return [{ index, title: shot.title, label: '静态参考图' }]
+    }
+    return []
+  })
 }
 
 export function exportInputsChanged(before: Episode, after: Episode, beforeProject: Pick<Project, 'workType'> = {}, afterProject = beforeProject) {

@@ -1,10 +1,11 @@
 const assert = require('node:assert/strict')
-const { mkdtemp, readFile, rename, rm, symlink, writeFile } = require('node:fs/promises')
+const { mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } = require('node:fs/promises')
 const { tmpdir } = require('node:os')
 const path = require('node:path')
 const { test } = require('node:test')
 const { folderNameSchema, totalFrames, timecode } = require('../dist/shared/model')
 const { ProjectStore } = require('../dist/main/storage')
+const { RecentProjects } = require('../dist/main/recent-projects')
 const { exportDestination, subtitleText } = require('../dist/main/render')
 const { rangeFor } = require('../dist/main/media-protocol')
 
@@ -39,6 +40,37 @@ test('并行编辑串行提交，打开迁移目录后保留 30 帧时基及排�
   assert.deepEqual(loaded.snapshot.episodes[0].shots.map(shot => shot.title), ['二', '一', '三', '四'])
   assert.equal(totalFrames(loaded.snapshot.episodes[0]), 900)
   assert.equal(timecode(225, true), '00:07:15')
+})
+
+test('两个存储实例同时编辑时只提交一次，重开后可以继续保存', async context => {
+  const root = await workspace(context)
+  const first = await ProjectStore.create(root, '共享作品')
+  const second = await ProjectStore.open(first.root)
+  const edits = ['甲集', '乙集']
+  const results = await Promise.allSettled([first, second].map((store, index) => store.edit({ type: 'episode.add', title: edits[index] })))
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1)
+  const rejected = results.findIndex(result => result.status === 'rejected')
+  assert.match(results[rejected].reason.message, /磁盘上的作品已变更/)
+  const reopened = await ProjectStore.open(first.root)
+  assert.deepEqual(reopened.snapshot.episodes.map(episode => episode.title), [edits[1 - rejected]])
+  await reopened.edit({ type: 'episode.add', title: edits[rejected] })
+  assert.equal(reopened.snapshot.episodes.length, 2)
+  assert.deepEqual((await readdir(first.root)).sort(), ['media', 'project.json'])
+})
+
+test('最近作品和素材目录可在重启后恢复，找不到目录时回到有效位置', async context => {
+  const root = await workspace(context)
+  const project = await ProjectStore.create(root, '示例 项目', true)
+  const media = await mkdtemp(path.join(root, '素材 目录'))
+  const first = await RecentProjects.open(root)
+  await first.remember({ directory: project.root, title: project.snapshot.title, fictional: true })
+  await first.rememberMedia(path.join(media, '示例.mp4'))
+  const reopened = await RecentProjects.open(root)
+  assert.deepEqual(reopened.entries, first.entries)
+  assert.equal(await reopened.defaultDirectory('project'), path.dirname(project.root))
+  assert.equal(await reopened.defaultDirectory('media', project.root), media)
+  await rename(media, media + '-moved')
+  assert.equal(await reopened.defaultDirectory('media', project.root), project.root)
 })
 
 test('素材复制、活动版本切换、错误格式拒绝、迁移后素材可读', async context => {

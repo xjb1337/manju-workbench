@@ -1,11 +1,11 @@
 const assert = require('node:assert/strict')
-const { mkdtemp, readFile, rm } = require('node:fs/promises')
+const { mkdtemp, readFile, rm, writeFile } = require('node:fs/promises')
 const { tmpdir } = require('node:os')
 const path = require('node:path')
 const { test } = require('node:test')
-const { detailKinds, frameSpec, shotMethod } = require('../dist/shared/creative')
+const { briefSchema, detailKinds, frameSpec, generationToolUrl, shotMethod } = require('../dist/shared/creative')
 const { productionProgress } = require('../dist/shared/production')
-const { planningPrompt, shotPromptBody, shotPromptText } = require('../dist/shared/prompts')
+const { planningPrompt, savedShotPrompt, shotPromptBody, shotPromptText } = require('../dist/shared/prompts')
 const { renderEpisode, subtitles } = require('../dist/main/render')
 const { probe } = require('../dist/main/process')
 const { ProjectStore } = require('../dist/main/storage')
@@ -25,6 +25,9 @@ async function setup(context) {
 test('旧版 JSON 打开后保留原字段，预览与导出共享横竖画布、字幕 PlayRes 和实际 MP4 尺寸', async context => {
   const { store, file } = await setup(context)
   const raw = JSON.parse(await readFile(file, 'utf8'))
+  assert.equal(raw.schemaVersion, 2)
+  raw.schemaVersion = 1
+  await writeFile(file, JSON.stringify(raw))
   assert.equal(raw.schemaVersion, 1)
   for (const key of ['workType', 'brief', 'plan']) assert.ok(!(key in raw))
   for (const key of ['method', 'details']) assert.ok(!(key in raw.episodes[0].shots[0]))
@@ -52,8 +55,85 @@ test('旧版 JSON 打开后保留原字段，预览与导出共享横竖画布�
     }
     assert.deepEqual(sizes, [[width, height], [width, height]])
     await opened.recordExport(episode, ratio, snapshot)
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).schemaVersion, 2)
     if (!index) renderedLandscape = episode
   }
+})
+
+test('长字幕分页且覆盖完整台词，镜头不足一帧一页时提示调整', () => {
+  const lines = Array.from({ length: 30 }, (_, i) => `第 ${i + 1} 行字幕`)
+  const shot = { dialogue: lines.join('\n'), frames: 60 }
+  for (const ratio of ['9:16', '16:9']) {
+    const body = subtitles(shot, frameSpec({ brief: { ratio } }))
+    const events = body.split('\n').filter(line => line.startsWith('Dialogue: '))
+    const pages = events.map(event => event.split(',,0,0,0,,')[1].split('\\N'))
+    assert.ok(pages.every(page => page.length <= 4))
+    assert.deepEqual(pages.flat(), lines)
+    assert.match(events[0], /^Dialogue: 0,0:00:00\.00,/)
+    assert.match(events.at(-1), /,0:00:02\.00,Chinese/)
+  }
+  assert.throws(() => subtitles({ ...shot, frames: 1 }, frameSpec()), /镜头时长不足/)
+})
+
+test('旧版 Flow 规划仍能提供通用视频提示词，旧稿可继续编辑', async context => {
+  const { store, episodeId, shotId } = await setup(context)
+  const plain = store.snapshot
+  const shot = plain.episodes[0].shots[0]
+  assert.equal(shot.prompt, '手改旧生图')
+  assert.equal(savedShotPrompt(plain, shot, 'image'), undefined)
+  const staged = await store.previewPlan(episodeId, JSON.stringify({ schemaVersion: 1, missing: [], episode: { shots: [
+    { shotId, details: { image: '新生图提示词', flow: '新视频提示词' } },
+  ] } }))
+  const saved = await store.mergePlan(staged.token, staged.changes.filter(change => change.conflict).map(change => change.id))
+  const current = saved.episodes[0].shots[0]
+  assert.equal(current.prompt, '手改旧生图')
+  assert.equal(savedShotPrompt(saved, current, 'image'), shotPromptText(saved, '新生图提示词'))
+  assert.equal(savedShotPrompt(saved, current, 'flow'), shotPromptText(saved, '新视频提示词'))
+})
+
+test('生图和视频工具可独立配置，规划提示词使用工具名和通用字段', async context => {
+  const { store, episodeId, shotId } = await setup(context)
+  const generation = {
+    image: { name: '本地生图软件' },
+    video: { name: '示例视频服务', url: 'http://127.0.0.1:8188/' },
+  }
+  assert.equal(briefSchema.parse({ generation }).generation.image.url, '')
+  for (const url of ['file:///C:/example.html', 'https://account@example.test/', 'https://bad\\url.example/']) {
+    assert.equal(generationToolUrl.safeParse(url).success, false)
+  }
+  await store.edit({ type: 'project.brief', workType: 'story', brief: { generation } })
+  const plan = await store.previewPlan(episodeId, JSON.stringify({ schemaVersion: 1, missing: [], episode: { shots: [
+    { shotId, method: 'video-only', details: { image: '先前的绘图说明', video: '按文字生成镜头' } },
+  ] } }))
+  const saved = await store.mergePlan(plan.token, plan.changes.filter(change => change.conflict).map(change => change.id))
+  const episode = saved.episodes[0]
+  const shot = episode.shots[0]
+  assert.equal(shot.method, 'flow-only')
+  assert.equal(shot.details.flow.body, '按文字生成镜头')
+  assert.match(shotPromptBody(saved, episode, shot, 'flow'), /按镜头文字描述制作/)
+  const copied = savedShotPrompt(saved, shot, 'flow')
+  assert.match(copied, /本地生图软件[\s\S]*示例视频服务[\s\S]*按文字生成镜头/)
+  assert.doesNotMatch(copied, /127\.0\.0\.1/)
+  const text = planningPrompt(saved, episode)
+  const schema = JSON.parse(text.split('返回格式（JSON Schema）\n')[1])
+  const shotSchema = schema.properties.episode.properties.shots.items.properties
+  assert.deepEqual(shotSchema.method.enum, ['image-video', 'image', 'video-only', 'code', 'imported'])
+  assert.ok(shotSchema.details.properties.video)
+  assert.equal(shotSchema.details.properties.flow, undefined)
+  assert.match(text, /"method": "video-only"/)
+  assert.doesNotMatch(text, /ChatGPT|Google Flow|127\.0\.0\.1/)
+
+  const review = await store.importMedia({ scope: 'shot', episodeId, shotId, kind: 'image' }, path.resolve('resources/sample/01.jpg'))
+  // Importing a reference can flag previous details for review. Accept both before switching tools.
+  for (const kind of ['image', 'flow']) await store.edit({ type: 'shot.detail', episodeId, shotId, kind, action: { type: 'keep' } })
+  const changed = await store.edit({ type: 'project.brief', workType: 'story',
+    brief: { generation: { ...generation, video: { name: '另一视频工具' } } } })
+  const updated = changed.episodes[0].shots[0]
+  assert.equal(updated.details.flow.needsUpdate, true)
+  assert.equal(updated.details.image.needsUpdate, undefined)
+  assert.deepEqual(updated.media, review.episodes[0].shots[0].media)
+  const reopened = await ProjectStore.open(store.root)
+  assert.equal(reopened.snapshot.brief.generation.video.name, '另一视频工具')
 })
 
 test('知识、代码和混合流程按实际逐镜方式、素材、任务书与 omit 判定', async context => {
@@ -120,7 +200,7 @@ test('总规划提示词包含公开的 JSON Schema、待补项和已知简报�
   const project = store.snapshot
   const text = planningPrompt(project, project.episodes[0])
   assert.match(text, /UTF-8 JSON/)
-  assert.match(text, /待补项：受众、风格、语言、使用工具/)
+  assert.match(text, /待补项：受众、风格、语言。/)
   assert.match(text, /勿编造/)
   assert.match(text, /示例 \/ 虚构/)
   assert.match(text, /"主题": "声音频谱"/)

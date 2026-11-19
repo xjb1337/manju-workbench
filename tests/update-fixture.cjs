@@ -1,9 +1,12 @@
 const { createHash } = require('node:crypto')
 const { createServer } = require('node:http')
 const { once } = require('node:events')
+const { version: currentVersion } = require('../package.json')
 
 const releasesPath = '/repos/xjb1337/manju-workbench/releases'
 const notes = '虚构验收发布\n改善示例镜头导出。\n<strong>这段标记按纯文本显示</strong>'
+const [major, minor, patch] = currentVersion.split('.').map(Number)
+const futureVersion = `${major}.${minor}.${patch + 1}`
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 
 function executableFixture() {
@@ -20,7 +23,7 @@ function executableFixture() {
   return bytes
 }
 
-function releaseFixture({ version = '1.2.0', kind = 'setup', fileName, bytes = executableFixture(),
+function releaseFixture({ version = futureVersion, kind = 'setup', fileName, bytes = executableFixture(),
   size = bytes.length, digest = sha256(bytes), sent = bytes, manifestVersion = version,
   manifestFileName, manifestKind = kind, manifestSize = size, githubDigest } = {}) {
   const tag = `v${version}`
@@ -82,4 +85,4 @@ async function startUpdateFixture() {
   }
 }
 
-module.exports = { releasesPath, notes, sha256, executableFixture, releaseFixture, loopbackRequest, atUrl, startUpdateFixture }
+module.exports = { releasesPath, notes, futureVersion, sha256, executableFixture, releaseFixture, loopbackRequest, atUrl, startUpdateFixture }

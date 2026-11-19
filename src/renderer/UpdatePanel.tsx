@@ -27,7 +27,10 @@ export function UpdatePanel({ busy, dirty }: { busy: boolean; dirty: boolean }) 
     try {
       const reply = await invoke()
       if (reply.ok) accept(reply.value)
-      else setError(reply.error)
+      else {
+        if (reply.code === 'update-package-invalid') setReady('')
+        setError(reply.error)
+      }
     } catch {
       setError('桌面进程连接中断')
     } finally {
