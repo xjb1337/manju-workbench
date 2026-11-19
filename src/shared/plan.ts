@@ -103,7 +103,8 @@ export const aiInstructionSchema = z.string().trim().max(2000, '补充要求最�
 export interface AiConnectionTestResult {
   models: string[]
   latencyMs: number
-  probedByCompletion?: boolean
+  modelList: 'valid' | 'invalid' | 'unavailable'
+  issue?: string
 }
 
 export interface PlanChange {

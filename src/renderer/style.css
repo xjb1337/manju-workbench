@@ -204,7 +204,7 @@ footer > span { display: flex; align-items: center; gap: 6px; min-width: 0; whit
 .welcome-card h1 { font-size: 30px; }
 .welcome-mark, .empty-icon { display: grid; place-items: center; color: var(--accent-ink); background: var(--accent-bg); border: 1px solid var(--line-strong); border-radius: 17px; width: 76px; height: 76px; }
 .sample-link { font-size: 13px; color: var(--accent-ink); }
-.empty-stage { min-height: 330px; }
+.empty-stage { min-height: 330px; padding: 18px; }
 .empty-icon { width: 64px; height: 64px; }
 .text-editor, .reference-edit { max-width: 900px; padding: 20px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
 .text-editor .section-head { margin-bottom: 15px; }
@@ -272,10 +272,13 @@ dialog:has(.episode-player[data-ratio="9:16"]) { width: min(475px, calc(100vw - 
 .recent-projects button strong, .recent-projects button small { display: block; overflow: hidden; text-overflow: ellipsis; }
 .recent-projects button small { color: var(--muted); font-weight: 400; }
 
+.brief-stage { scroll-padding-block: 16px; }
+.brief-stage :is(input, select, textarea) { scroll-margin-block-start: 24px; }
 .brief-layout { max-width: 1060px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(265px, .55fr); align-items: start; gap: 16px; }
 .brief-form, .planning-panel, .plan-results { padding: 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
-.brief-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.brief-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .brief-grid .field { min-width: 0; margin: 0; }
+.brief-grid .field > :is(input, select, textarea) { min-width: 0; width: 100%; }
 .brief-grid .span { grid-column: 1 / -1; }
 .generation-settings { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
 .generation-help { color: var(--muted); margin-top: 4px; }
@@ -337,9 +340,9 @@ dialog:has(.creative-dialog) { width: min(855px, calc(100vw - 42px)); max-height
 .prompt-settings { background: var(--well); border-radius: 6px; padding: 6px 10px; margin-bottom: 9px; }
 .prompt-settings summary { cursor: pointer; width: fit-content; font-size: 12px; }
 .detail-confirm { margin-top: 12px; }
-.ai-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
-.ai-dot.connected { background: var(--ok); }
-.ai-dot.error { background: var(--danger); }
+.gateway-status { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 8px 10px; border-radius: 7px; background: var(--well); font-size: 12px; }
+.gateway-reachable { color: var(--ok); }
+.gateway-issue { color: var(--danger); }
 .empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
 .ai-gateway-bar { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 .ai-settings-form { display: grid; gap: 12px; }
@@ -369,7 +372,7 @@ dialog:has(.creative-dialog) { width: min(855px, calc(100vw - 42px)); max-height
     outline: 2px solid Highlight;
     outline-offset: -2px;
   }
-  .clip-state, .ai-dot, .monitor-dot {
+  .clip-state, .monitor-dot {
     border: 1px solid CanvasText;
   }
   dialog {

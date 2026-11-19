@@ -6,7 +6,7 @@ import { folderNameSchema, type MediaTarget, type Mutation, type Project, type T
 import { defaultAiGatewayConfig, type AiGatewayConfig } from '../shared/plan'
 import { exportFallbacks, productionProgress, type StepId } from '../shared/production'
 import { legacyDetail, savedShotPrompt } from '../shared/prompts'
-import { AiSettingsDialog, ScriptAiDialog } from './AiPanels'
+import { AiSettingsDialog, sameGateway, ScriptAiDialog, type GatewayProbe } from './AiPanels'
 import { Badge, Modal, NameModal, PreviewPlayer, kindLabel, sequence } from './components'
 import { BriefPanel, DetailDialog, PlanImportDialog, PlanningDialog } from './CreativePanels'
 import { Inspector } from './Inspector'
@@ -17,7 +17,7 @@ import { WelcomeView } from './WelcomeView'
 import { ProjectSidebar, ReferenceView, ScriptView, type Tab } from './WorkspaceViews'
 import { useWorkbenchShortcuts } from './useWorkbenchShortcuts'
 
-type EditorField = 'shot-prompt' | 'shot-video-prompt' | 'shot-dialogue' | 'generation-image-name' | 'generation-video-name'
+type EditorField = 'shot-prompt' | 'shot-video-prompt' | 'shot-dialogue' | 'script-text' | 'generation-image-name' | 'generation-video-name'
 type Ask =
   | { kind: 'name'; title: string; initial?: string; confirm: string; action: (name: string) => Promise<boolean> }
   | { kind: 'remove'; title: string; name: string; change: Mutation }
@@ -65,8 +65,9 @@ export function App() {
   const [creativeDialog, setCreativeDialog] = useState<'plan' | 'import' | 'magpie' | DetailKind | null>(null)
   const [magpieSeedScript, setMagpieSeedScript] = useState<string | null>(null)
   const [aiConfig, setAiConfig] = useState<AiGatewayConfig>(defaultAiGatewayConfig)
-  const [discoveredModels, setDiscoveredModels] = useState<string[]>([])
-  const [aiConnected, setAiConnected] = useState<boolean | null>(null)
+  const [gatewayProbe, setGatewayProbe] = useState<GatewayProbe | null>(null)
+  const discoveredModels = gatewayProbe && 'result' in gatewayProbe && sameGateway(aiConfig, gatewayProbe)
+    ? gatewayProbe.result.models : []
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false)
   const [scriptAi, setScriptAi] = useState<{
     scope: 'project' | 'episode'; script: string; apply: (next: string) => void
@@ -85,6 +86,7 @@ export function App() {
   const method = shotMethod(project ?? {}, shot)
   const onWelcome = !opened
   const shotIndex = episode && shot ? episode.shots.indexOf(shot) : 0
+  const hasScript = !!(episode?.script.trim() || project?.script.trim())
   const canRender = !!episode?.shots.length && !dirty && !busy
 
   function shotForStep(id: StepId) {
@@ -152,7 +154,7 @@ export function App() {
   function saveAiConfig(next: AiGatewayConfig, failure?: (text: string) => void) {
     return run(() => api.setAiConfig(next), saved => {
       setAiConfig(saved)
-      setAiConnected(null)
+      setGatewayProbe(current => current && sameGateway(saved, current) ? current : null)
     }, failure)
   }
 
@@ -277,6 +279,12 @@ export function App() {
     }
     if (tab === 'script' && scriptScope !== scope) navigate(open)
     else goTo('script', open)
+  }
+
+  function writeScript() {
+    const scope = episode ? 'episode' : 'project'
+    if (tab === 'script' && scriptScope === scope) setFocusField('script-text')
+    else goToScript(scope, () => setFocusField('script-text'))
   }
 
   function selectGuideStep(id: StepId) {
@@ -409,9 +417,10 @@ export function App() {
     if (!project) return null
     const targetShot = guideShot
     if (step === 'script') return <>
-      <button onClick={() => goToScript('project')} disabled={busy}>作品剧本</button>
-      {episode && <button onClick={() => goToScript('episode')} disabled={busy}>集数剧本</button>}
-      <button className="primary" onClick={() => openMagpieDialog()} disabled={busy}><Sparkle size={15} /> AI 生成分镜草案</button>
+      {!hasScript && <button className="primary" onClick={writeScript} disabled={busy}>写／粘贴剧本</button>}
+      {(hasScript || episode) && <button onClick={() => goToScript('project')} disabled={busy}>作品剧本</button>}
+      {episode && hasScript && <button onClick={() => goToScript('episode')} disabled={busy}>集数剧本</button>}
+      {hasScript && <button className="primary" onClick={() => openMagpieDialog()} disabled={busy}><Sparkle size={15} /> AI 生成分镜草案</button>}
     </>
     if (step === 'references') return <>
       <button onClick={() => goTo('characters')} disabled={busy}>角色参考</button>
@@ -421,8 +430,11 @@ export function App() {
         : <button onClick={addReference} disabled={busy}>新建参考</button>)}
     </>
     if (!episode || !targetShot || step === 'shots') return <>
-      <button className="primary" disabled={busy} onClick={() => navigate(episode ? addShot : addEpisode)}>{episode ? '新建镜头' : '新建集数'}</button>
-      <button disabled={busy} onClick={() => openMagpieDialog()}><Sparkle size={15} /> AI 生成分镜草案</button>
+      {!targetShot && !hasScript && <button className="primary" onClick={writeScript} disabled={busy}>写／粘贴剧本</button>}
+      <button className={targetShot ? 'primary' : undefined} disabled={busy}
+        onClick={() => navigate(episode ? addShot : addEpisode)}>{episode ? '新建镜头' : '新建集数'}</button>
+      <button className={!targetShot && hasScript ? 'primary' : undefined} disabled={busy} onClick={() => openMagpieDialog()}>
+        <Sparkle size={15} /> {hasScript || targetShot ? 'AI 生成分镜草案' : '粘贴剧本'}</button>
       <button className="subtle" disabled={busy} onClick={() => setCreativeDialog('import')}>导入外部规划</button>
     </>
     if (step === 'export') return <button className="primary" disabled={!canRender} onClick={requestExport}>导出 MP4</button>
@@ -474,7 +486,6 @@ export function App() {
         <button className="subtle" onClick={() => setAiSettingsOpen(true)} disabled={busy} title={`${aiConfig.baseUrl} · ${aiConfig.model}`}>
           <SlidersHorizontal size={17} />
           <span>AI 设置</span>
-          {aiConnected !== null && <span className={`ai-dot ${aiConnected ? 'connected' : 'error'}`} aria-hidden="true" />}
         </button>
         <UpdatePanel busy={busy} dirty={dirty} />
         <button className="icon subtle" aria-label={dark ? '切换浅色' : '切换深色'} title={dark ? '切换浅色' : '切换深色'}
@@ -513,7 +524,7 @@ export function App() {
           onOpenEpisodeScript={() => navigate(() => { setScriptScope('episode'); setTab('script'); setDirty(false); setEditorRevision(value => value + 1) })}
           onPreview={() => void render('preview')} onRebuildPreview={() => void render('preview', true)} onExport={requestExport} onExportSrt={exportSrt}
           onAddPrimary={() => episode ? addShot() : addEpisode()}
-          onMagpie={() => openMagpieDialog()}
+          hasScript={hasScript} onWriteScript={writeScript} onMagpie={() => openMagpieDialog()}
           onImportPlan={() => setCreativeDialog('import')}
           onSelectShot={selectShot}
           onAddShot={() => navigate(addShot)}
@@ -524,7 +535,7 @@ export function App() {
           : tab === 'brief' ? <BriefPanel key={project.id + editorRevision} project={project} episode={episode} busy={busy}
             onDirty={setDirty} onSave={change => edit(change, () => setMessage({ text: '简报已保存' }))}
             onPlan={() => setCreativeDialog('plan')} onImport={() => setCreativeDialog('import')}
-            onMagpie={() => openMagpieDialog()} />
+            hasScript={hasScript} onWriteScript={writeScript} onMagpie={() => openMagpieDialog()} />
           : tab === 'script' ? <ScriptView project={project} episode={episode} scriptScope={scriptScope}
             editorRevision={editorRevision} busy={busy}
             onSelectScope={scope => navigate(() => { setScriptScope(scope); setDirty(false); setEditorRevision(value => value + 1) })}
@@ -672,15 +683,11 @@ export function App() {
       {message?.error && <p className="inline-error" role="alert">{message.text}</p>}
       <div className="dialog-actions"><button onClick={() => setPlayer('')}>关闭预览</button></div>
     </Modal>}
-    {aiSettingsOpen && <AiSettingsDialog config={aiConfig} discoveredModels={discoveredModels} busy={busy}
-      onTest={(next, acceptTest, failure) => void run(() => api.testAiConnection(next), result => {
-        setDiscoveredModels(result.models)
-        setAiConnected(true)
-        acceptTest(result)
-      }, message => {
-        setAiConnected(false)
-        failure(message)
-      })}
+    {aiSettingsOpen && <AiSettingsDialog config={aiConfig} probe={gatewayProbe} busy={busy}
+      onEndpointChange={() => setGatewayProbe(null)}
+      onTest={next => void run(() => api.testAiConnection(next),
+        result => setGatewayProbe({ ...next, result }),
+        error => setGatewayProbe({ ...next, error }))}
       onSave={(next, failure) => void saveAiConfig(next, failure).then(ok => {
         if (ok) {
           setAiSettingsOpen(false)

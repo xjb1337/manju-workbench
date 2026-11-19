@@ -18,24 +18,36 @@ export function aiGatewaySummary(config: AiGatewayConfig) {
   }
 }
 
+export type GatewayProbe = Pick<AiGatewayConfig, 'preset' | 'baseUrl'> & (
+  | { result: AiConnectionTestResult }
+  | { error: string }
+)
+
+export function sameGateway(left: Pick<AiGatewayConfig, 'preset' | 'baseUrl'>, right: Pick<AiGatewayConfig, 'preset' | 'baseUrl'>) {
+  return left.preset === right.preset && left.baseUrl.trim().replace(/\/+$/, '') === right.baseUrl.trim().replace(/\/+$/, '')
+}
+
 export function AiSettingsDialog({
   config,
-  discoveredModels,
+  probe,
   busy,
+  onEndpointChange,
   onTest,
   onSave,
   close,
 }: {
   config: AiGatewayConfig
-  discoveredModels: string[]
+  probe: GatewayProbe | null
+  onEndpointChange: () => void
   busy: boolean
-  onTest: (config: AiGatewayConfig, accept: (result: AiConnectionTestResult) => void, failure: Failure) => void
+  onTest: (config: AiGatewayConfig) => void
   onSave: (config: AiGatewayConfig, failure: Failure) => void
   close: () => void
 }) {
   const [draft, setDraft] = useState<AiGatewayConfig>(() => ({ ...config }))
-  const [models, setModels] = useState<string[]>(discoveredModels)
-  const [testNotice, setTestNotice] = useState('')
+  const currentProbe = probe && sameGateway(draft, probe) ? probe : null
+  const result = currentProbe && 'result' in currentProbe ? currentProbe.result : null
+  const models = result?.models ?? []
   const [error, setError] = useState('')
   const [fieldErrors, setFieldErrors] = useState<{ baseUrl?: string; model?: string }>({})
   const presetId = useId()
@@ -69,7 +81,7 @@ export function AiSettingsDialog({
       ? { ...current, preset }
       : { preset, baseUrl: info.baseUrl, model: info.defaultModel })
     setFieldErrors({})
-    setTestNotice('')
+    onEndpointChange()
     setError('')
   }
 
@@ -102,7 +114,8 @@ export function AiSettingsDialog({
           onChange={event => {
             setDraft(current => ({ ...current, baseUrl: event.target.value }))
             setFieldErrors(current => ({ ...current, baseUrl: undefined }))
-            setTestNotice('')
+            onEndpointChange()
+            setError('')
           }} />
         {fieldErrors.baseUrl && <p id={baseUrlErrorId} className="inline-error" role="alert">{fieldErrors.baseUrl}</p>}
       </div>
@@ -133,19 +146,26 @@ export function AiSettingsDialog({
         ))}
       </div>}
 
+      {currentProbe && <div className="gateway-status" role="status">
+        {result ? <>
+          <span className="gateway-reachable">服务可达（{result.latencyMs} ms）</span>
+          <span>{result.modelList === 'valid' ? `模型列表有效（${result.models.length} 个模型）`
+            : result.modelList === 'invalid' ? '模型列表无效' : '模型列表不可用'}</span>
+          <span>当前模型生成未验证</span>
+          {result.issue && <span className="gateway-issue">{result.issue}</span>}
+        </> : 'error' in currentProbe && <>
+          <span className="gateway-issue">服务不可达</span>
+          <span>{currentProbe.error}</span>
+        </>}
+      </div>}
       {error && <p className="inline-error" role="alert">{error}</p>}
 
       <div className="dialog-actions">
-        <span className="dialog-status" role="status">{testNotice}</span>
         <button type="button" disabled={busy} onClick={() => {
           const parsed = parseDraft()
           if (!parsed) return
-          setTestNotice('')
-          onTest(parsed, result => {
-            setModels(result.models)
-            const modelInfo = result.models.length ? ` · ${result.models.length} 个模型` : ''
-            setTestNotice(`已连接（${result.latencyMs} ms${modelInfo}）`)
-          }, setError)
+          onEndpointChange()
+          onTest(parsed)
         }}><PlugsConnected size={16} /> 测试连接</button>
         <button type="button" disabled={busy} onClick={close}>取消</button>
         <button type="submit" className="primary" disabled={busy}>保存设置</button>

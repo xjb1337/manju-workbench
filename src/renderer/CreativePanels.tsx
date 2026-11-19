@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
-import { ArrowSquareOut, Copy, FloppyDisk, Sparkle } from '@phosphor-icons/react'
+import { ArrowSquareOut, Copy, FileText, FloppyDisk, Sparkle } from '@phosphor-icons/react'
 import {
   defaultMethod, detailLabels, frameSpec, generationKindSchema, generationLabels, generationPresets, generationToolUrl,
   methodLabels, ratioSchema, workTypeLabels, workTypeSchema,
@@ -22,9 +22,9 @@ const briefTextFields = ['theme', 'audience', 'style', 'language', 'tools', 'ter
 const generationKinds = generationKindSchema.options
 const emptyTool: GenerationTool = { name: '', url: '' }
 
-export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, onImport, onMagpie }: {
+export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, onImport, hasScript, onWriteScript, onMagpie }: {
   project: Project; episode?: Episode; busy: boolean; onDirty: (dirty: boolean) => void
-  onSave: (change: BriefChange) => Promise<boolean> | void; onPlan: () => void; onImport: () => void; onMagpie: () => void
+  onSave: (change: BriefChange) => Promise<boolean> | void; onPlan: () => void; onImport: () => void; hasScript: boolean; onWriteScript: () => void; onMagpie: () => void
 }) {
   function fields() {
     return {
@@ -80,7 +80,7 @@ export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, on
     if (dirty && !(await commitBrief())) return
     openDialog()
   }
-  return <main className="stage wide">
+  return <main className="stage wide brief-stage">
     <div className="stage-heading"><h2>制作简报</h2></div>
     <div className="brief-layout">
       <form className="brief-form" onSubmit={save}>
@@ -141,7 +141,10 @@ export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, on
           <ul>{(missing.length ? missing : ['无']).map(item => <li key={item}>{item}</li>)}</ul>
         </div>
         <div className="plan-buttons">
-          <button type="button" className="primary" disabled={busy} onClick={() => void saveThenOpen(onMagpie)}><Sparkle size={16} /> AI 生成分镜草案</button>
+          {hasScript
+            ? <button type="button" className="primary" disabled={busy} onClick={() => void saveThenOpen(onMagpie)}><Sparkle size={16} /> AI 生成分镜草案</button>
+            : <button type="button" className="primary" disabled={busy} onClick={onWriteScript}><FileText size={16} /> 写／粘贴剧本</button>}
+          {!hasScript && <button type="button" disabled={busy} onClick={() => void saveThenOpen(onMagpie)}>粘贴剧本</button>}
           <button type="button" disabled={busy} onClick={() => void saveThenOpen(onPlan)}>总规划提示词</button>
           <button type="button" disabled={busy} onClick={() => void saveThenOpen(onImport)}>导入外部规划</button>
         </div>

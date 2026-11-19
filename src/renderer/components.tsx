@@ -229,7 +229,7 @@ export function TextEditor({ title, name, script, field, busy, onSave, onRemove,
       </div></div>
       <label className="field">名称<input value={draft.name} required maxLength={100}
         onChange={event => setDraft({ ...draft, name: event.target.value })} /></label>
-      <label className="field">{field}<textarea rows={field === '剧本' ? 13 : 6} maxLength={30000} value={draft.script}
+      <label className="field">{field}<textarea id={field === '剧本' ? 'script-text' : undefined} rows={field === '剧本' ? 13 : 6} maxLength={30000} value={draft.script}
         onChange={event => setDraft({ ...draft, script: event.target.value })} /></label>
     </fieldset>
   </form>

@@ -200,7 +200,7 @@ function wire() {
   handle('ai:set-config', (_win, input) => recent.setAiGateway(aiGatewayConfigSchema.parse(input)))
   handle('ai:test-connection', (_win, input) => workbench.serial(async () => {
     const config = aiGatewayConfigSchema.parse(input)
-    return testAiGateway(config.baseUrl, config.model, new AbortController().signal)
+    return testAiGateway(config.baseUrl, new AbortController().signal)
   }))
   handle('plan:generate-magpie', (_win, key, episodeInput, modelInput, scriptInput) => workbench.serial(async () => {
     const store = workbench.getStore(key)
