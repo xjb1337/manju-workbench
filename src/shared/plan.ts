@@ -64,9 +64,47 @@ export type ExternalPlan = z.infer<typeof externalPlanSchema>
 export const maxPlanCharacters = 1_000_000
 export const magpieBaseUrl = 'http://127.0.0.1:3425/v1'
 export const magpieDefaultModel = 'group/never-stuck'
-export const magpieModelSchema = z.string().trim().min(1, '请输入 Magpie 模型 ID').max(200, '模型 ID 最多 200 个字符')
+export const magpieModelSchema = z.string().trim().min(1, '请输入模型 ID').max(200, '模型 ID 最多 200 个字符')
   .refine(value => !/[\x00-\x1f\x7f]/.test(value), '模型 ID 不能包含控制字符')
 export const magpieScriptSchema = detailTextSchema.trim().min(1, '请输入要拆分的剧本文本')
+
+export const aiPresetSchema = z.enum(['magpie', 'ollama', 'lmstudio', 'custom'])
+export type AiPreset = z.infer<typeof aiPresetSchema>
+export const aiGatewayPresets: Record<AiPreset, { label: string; baseUrl: string; defaultModel: string }> = {
+  magpie: { label: 'Magpie 本机网关', baseUrl: magpieBaseUrl, defaultModel: magpieDefaultModel },
+  ollama: { label: 'Ollama 本机服务', baseUrl: 'http://127.0.0.1:11434/v1', defaultModel: 'qwen2.5:14b' },
+  lmstudio: { label: 'LM Studio', baseUrl: 'http://127.0.0.1:1234/v1', defaultModel: 'local-model' },
+  custom: { label: '自定义兼容网关', baseUrl: magpieBaseUrl, defaultModel: magpieDefaultModel },
+}
+export const aiBaseUrlSchema = z.string().trim().min(1, '请输入网关地址').max(500, '网关地址最多 500 个字符')
+  .refine(value => !/[\x00-\x1f\x7f]/.test(value), '网关地址不能包含控制字符')
+  .transform(value => value.replace(/\/+$/, ''))
+  .refine(value => {
+    try {
+      const url = new URL(value)
+      return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password && !url.search && !url.hash
+    } catch {
+      return false
+    }
+  }, '请输入有效的 http:// 或 https:// 网关地址（不含账号密码）')
+export const aiGatewayConfigSchema = z.object({
+  preset: aiPresetSchema,
+  baseUrl: aiBaseUrlSchema,
+  model: magpieModelSchema,
+})
+export type AiGatewayConfig = z.infer<typeof aiGatewayConfigSchema>
+export const defaultAiGatewayConfig: AiGatewayConfig = {
+  preset: 'magpie',
+  baseUrl: magpieBaseUrl,
+  model: magpieDefaultModel,
+}
+export const aiInstructionSchema = z.string().trim().max(2000, '补充要求最多 2,000 个字符')
+
+export interface AiConnectionTestResult {
+  models: string[]
+  latencyMs: number
+  probedByCompletion?: boolean
+}
 
 export interface PlanChange {
   id: string

@@ -16,3 +16,5 @@ coverage/
 artifacts/
 verification/
 *.exe
+.codegraph/
+Manju Workbench/

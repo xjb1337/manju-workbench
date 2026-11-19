@@ -368,3 +368,26 @@ test('RecentProjects 支持 theme 与 windowBounds 持久化', async context => 
   assert.equal(persisted.theme, 'light')
   assert.deepEqual(persisted.windowBounds, updatedBounds)
 })
+
+test('RecentProjects 支持 aiGateway 预设、地址与模型持久化', async context => {
+  const root = await workspace(context)
+  const prefs = await RecentProjects.open(root)
+  assert.deepEqual(prefs.aiGateway, {
+    preset: 'magpie',
+    baseUrl: 'http://127.0.0.1:3425/v1',
+    model: 'group/never-stuck',
+  })
+
+  await prefs.setAiGateway({
+    preset: 'ollama',
+    baseUrl: 'http://127.0.0.1:11434/v1/',
+    model: 'qwen2.5:14b',
+  })
+
+  const reopened = await RecentProjects.open(root)
+  assert.deepEqual(reopened.aiGateway, {
+    preset: 'ollama',
+    baseUrl: 'http://127.0.0.1:11434/v1',
+    model: 'qwen2.5:14b',
+  })
+})

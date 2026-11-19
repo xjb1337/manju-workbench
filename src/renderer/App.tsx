@@ -1,10 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { ArrowSquareOut, Broom, Check, FilmSlate, FolderOpen, Moon, Plus, Sun, WarningCircle, X } from '@phosphor-icons/react'
+import { ArrowSquareOut, Broom, Check, FilmSlate, FolderOpen, Moon, Plus, SlidersHorizontal, Sparkle, Sun, WarningCircle, X } from '@phosphor-icons/react'
 import type { OpenProject, RecentProject, RenderProgress, Reply } from '../shared/api'
 import { frameSpec, generationLabels, generationToolName, shotMethod, workTypeLabels, type DetailKind, type GenerationKind } from '../shared/creative'
 import { folderNameSchema, type MediaTarget, type Mutation, type Project, type Track } from '../shared/model'
+import { defaultAiGatewayConfig, type AiGatewayConfig } from '../shared/plan'
 import { exportFallbacks, productionProgress, type StepId } from '../shared/production'
 import { legacyDetail, savedShotPrompt } from '../shared/prompts'
+import { AiSettingsDialog, ScriptAiDialog } from './AiPanels'
 import { Badge, Modal, NameModal, PreviewPlayer, kindLabel, sequence } from './components'
 import { BriefPanel, DetailDialog, PlanImportDialog, PlanningDialog } from './CreativePanels'
 import { Inspector } from './Inspector'
@@ -60,6 +62,14 @@ export function App() {
   const [ask, setAsk] = useState<Ask | null>(null)
   const [dirty, setDirty] = useState(false)
   const [creativeDialog, setCreativeDialog] = useState<'plan' | 'import' | 'magpie' | DetailKind | null>(null)
+  const [magpieSeedScript, setMagpieSeedScript] = useState<string | null>(null)
+  const [aiConfig, setAiConfig] = useState<AiGatewayConfig>(defaultAiGatewayConfig)
+  const [discoveredModels, setDiscoveredModels] = useState<string[]>([])
+  const [aiConnected, setAiConnected] = useState<boolean | null>(null)
+  const [aiSettingsOpen, setAiSettingsOpen] = useState(false)
+  const [scriptAi, setScriptAi] = useState<{
+    scope: 'project' | 'episode'; script: string; apply: (next: string) => void
+  } | null>(null)
   const running = useRef(false)
 
   const project = opened?.project
@@ -85,6 +95,13 @@ export function App() {
   const guideShot = shotForStep(step)
 
   useEffect(() => api.onProgress(setProgress), [])
+  useEffect(() => {
+    let current = true
+    void api.getAiConfig?.().then(reply => {
+      if (current && reply.ok) setAiConfig(reply.value)
+    }).catch(() => {})
+    return () => { current = false }
+  }, [])
   useEffect(() => {
     if (!onWelcome) return
     let current = true
@@ -118,9 +135,21 @@ export function App() {
     shotIndex,
     busy,
     dirty,
-    hasModalOpen: Boolean(ask || creativeDialog || progress || player),
+    hasModalOpen: Boolean(ask || creativeDialog || progress || player || aiSettingsOpen || scriptAi),
     onSelectShot: selectShot,
   })
+
+  function openMagpieDialog(seedScript?: string) {
+    setMagpieSeedScript(seedScript ?? null)
+    setCreativeDialog('magpie')
+  }
+
+  function saveAiConfig(next: AiGatewayConfig, failure?: (text: string) => void) {
+    return run(() => api.setAiConfig(next), saved => {
+      setAiConfig(saved)
+      setAiConnected(null)
+    }, failure)
+  }
 
   function navigate(action: () => void) {
     if (dirty) setAsk({ kind: 'discard', action })
@@ -159,6 +188,8 @@ export function App() {
     setTab('shots')
     setGuideStep(null)
     setCreativeDialog(null)
+    setMagpieSeedScript(null)
+    setScriptAi(null)
     setScriptScope('project')
     setDirty(false)
     setEditorRevision(value => value + 1)
@@ -367,6 +398,7 @@ export function App() {
     if (step === 'script') return <>
       <button onClick={() => goToScript('project')} disabled={busy}>作品剧本</button>
       {episode && <button onClick={() => goToScript('episode')} disabled={busy}>集数剧本</button>}
+      <button className="primary" onClick={() => openMagpieDialog()} disabled={busy}><Sparkle size={15} /> AI 生成分镜草案</button>
     </>
     if (step === 'references') return <>
       <button onClick={() => goTo('characters')} disabled={busy}>角色参考</button>
@@ -375,8 +407,11 @@ export function App() {
         ? <button onClick={() => importMedia({ scope: 'reference', category, referenceId: reference.id })} disabled={busy}>导入参考图</button>
         : <button onClick={addReference} disabled={busy}>新建参考</button>)}
     </>
-    if (!episode || !targetShot || step === 'shots') return <button className="primary" disabled={busy}
-      onClick={() => navigate(episode ? addShot : addEpisode)}>{episode ? '新建镜头' : '新建集数'}</button>
+    if (!episode || !targetShot || step === 'shots') return <>
+      <button className="primary" disabled={busy} onClick={() => navigate(episode ? addShot : addEpisode)}>{episode ? '新建镜头' : '新建集数'}</button>
+      <button disabled={busy} onClick={() => openMagpieDialog()}><Sparkle size={15} /> AI 生成分镜草案</button>
+      <button className="subtle" disabled={busy} onClick={() => setCreativeDialog('import')}>导入外部规划</button>
+    </>
     if (step === 'export') return <button className="primary" disabled={!canRender} onClick={requestExport}>导出 MP4</button>
     if (step === 'code') return <button className="primary" disabled={busy} onClick={() => openDetail('code', targetShot)}>编辑代码任务书</button>
     if (isShotStep(step)) {
@@ -423,6 +458,11 @@ export function App() {
         <button className="subtle" onClick={() => navigate(() => addProject(false))} disabled={busy}><Plus size={17} /> 新建作品</button>
         <button className="subtle" onClick={() => navigate(() => void run(() => api.open(), next => { if (next) load(next) }))} disabled={busy}><FolderOpen size={18} /> 打开作品</button>
         <span className="separator" />
+        <button className="subtle" onClick={() => setAiSettingsOpen(true)} disabled={busy} title={`${aiConfig.baseUrl} · ${aiConfig.model}`}>
+          <SlidersHorizontal size={17} />
+          <span>AI 设置</span>
+          {aiConnected !== null && <span className={`ai-dot ${aiConnected ? 'connected' : 'error'}`} aria-hidden="true" />}
+        </button>
         <UpdatePanel busy={busy} dirty={dirty} />
         <button className="icon subtle" aria-label={dark ? '切换浅色' : '切换深色'} title={dark ? '切换浅色' : '切换深色'}
           onClick={() => setDark(!dark)}>{dark ? <Sun size={19} /> : <Moon size={19} />}</button>
@@ -459,23 +499,28 @@ export function App() {
           method={method} busy={busy} canRender={canRender} playerOpen={Boolean(player)}
           onOpenEpisodeScript={() => navigate(() => { setScriptScope('episode'); setTab('script'); setDirty(false); setEditorRevision(value => value + 1) })}
           onPreview={() => void render('preview')} onExport={requestExport}
-          onAddPrimary={() => episode ? addShot() : addEpisode()} onSelectShot={selectShot}
+          onAddPrimary={() => episode ? addShot() : addEpisode()}
+          onMagpie={() => openMagpieDialog()}
+          onImportPlan={() => setCreativeDialog('import')}
+          onSelectShot={selectShot}
           onAddShot={() => navigate(addShot)}
           onMoveShot={direction => episode && shot && void edit({ type: 'shot.move', episodeId: episode.id, shotId: shot.id, direction })}
           onDuplicateShot={() => navigate(duplicateShot)}
           onImportMedia={importMedia} onDropMedia={dropMedia}
           onPlaybackError={text => setMessage({ text, error: true })} />
           : tab === 'brief' ? <BriefPanel key={project.id + editorRevision} project={project} episode={episode} busy={busy}
-            onDirty={setDirty} onSave={change => void edit(change, () => setMessage({ text: '简报已保存' }))}
+            onDirty={setDirty} onSave={change => edit(change, () => setMessage({ text: '简报已保存' }))}
             onPlan={() => setCreativeDialog('plan')} onImport={() => setCreativeDialog('import')}
-            onMagpie={() => setCreativeDialog('magpie')} />
+            onMagpie={() => openMagpieDialog()} />
           : tab === 'script' ? <ScriptView project={project} episode={episode} scriptScope={scriptScope}
             editorRevision={editorRevision} busy={busy}
             onSelectScope={scope => navigate(() => { setScriptScope(scope); setDirty(false); setEditorRevision(value => value + 1) })}
             onDirty={setDirty}
             onSaveProject={(title, script) => void edit({ type: 'project.edit', title, script })}
             onSaveEpisode={(title, script) => episode && void edit({ type: 'episode.edit', episodeId: episode.id, title, script })}
-            onRemoveEpisode={() => episode && remove('删除集数', episode.title, { type: 'episode.remove', episodeId: episode.id })} />
+            onRemoveEpisode={() => episode && remove('删除集数', episode.title, { type: 'episode.remove', episodeId: episode.id })}
+            onAiAssist={(scope, script, apply) => setScriptAi({ scope, script, apply })}
+            onAiStoryboard={script => openMagpieDialog(script)} />
           : category && <ReferenceView opened={opened} category={category} references={references} reference={reference}
             editorRevision={editorRevision} busy={busy} onAddNavigate={() => navigate(addReference)} onAddDirect={addReference}
             onSelectReference={id => navigate(() => { setReferenceId(id); setDirty(false); setEditorRevision(value => value + 1) })}
@@ -504,8 +549,17 @@ export function App() {
       close={() => { if (!busy) setCreativeDialog(null) }} />}
     {opened && project && (creativeDialog === 'import' || creativeDialog === 'magpie') &&
       <PlanImportDialog key={creativeDialog} episode={episode} fictional={project.fictional} busy={busy}
+      aiConfig={aiConfig} discoveredModels={discoveredModels}
+      onOpenAiSettings={() => setAiSettingsOpen(true)}
+      onSaveModel={model => {
+        if (model !== aiConfig.model) {
+          void api.setAiConfig({ ...aiConfig, model }).then(reply => {
+            if (reply.ok) setAiConfig(reply.value)
+          }).catch(() => {})
+        }
+      }}
       source={creativeDialog === 'magpie' ? {
-        kind: 'magpie', script: episode?.script || project.script,
+        kind: 'magpie', script: magpieSeedScript ?? (episode?.script || project.script),
         preview: (model, script, acceptPreview, failure) => void run(
           () => api.generateMagpiePlan(opened.mediaKey, episode?.id ?? null, model, script), acceptPreview, failure),
         cancel: failure => void api.cancelPlanGeneration(opened.mediaKey).then(reply => {
@@ -516,14 +570,36 @@ export function App() {
       onMerge={(preview, replacements, failure) => void run(() => api.mergePlan(opened.mediaKey, preview.token, replacements), next => {
         accept(next)
         setCreativeDialog(null)
+        setMagpieSeedScript(null)
         setMessage({ text: '规划已合并' })
       }, failure)}
-      close={() => { if (!busy) setCreativeDialog(null) }} />}
-    {project && episode && shot && creativeDialog && creativeDialog !== 'plan' && creativeDialog !== 'import' && creativeDialog !== 'magpie' &&
+      close={() => { if (!busy) { setCreativeDialog(null); setMagpieSeedScript(null) } }} />}
+    {opened && project && episode && shot && creativeDialog && creativeDialog !== 'plan' && creativeDialog !== 'import' && creativeDialog !== 'magpie' &&
       <DetailDialog key={shot.id + creativeDialog} project={project} episode={episode} shot={shot} kind={creativeDialog} busy={busy}
+        aiConfig={aiConfig} onOpenAiSettings={() => setAiSettingsOpen(true)}
+        onOptimize={(body, instruction, acceptDraft, failure) => void run(
+          () => api.generateShotDetailDraft(opened.mediaKey, episode.id, shot.id, creativeDialog, body, instruction),
+          acceptDraft, failure,
+        )}
+        onCancelOptimize={failure => void api.cancelPlanGeneration(opened.mediaKey).then(reply => {
+          if (!reply.ok) failure(reply.error)
+        }).catch(() => failure('桌面进程连接中断'))}
         onDirty={setDirty} copy={(text, failure) => run(() => api.copy(text), undefined, failure)}
         save={(action, failure) => edit({ type: 'shot.detail', episodeId: episode.id, shotId: shot.id, kind: creativeDialog, action }, undefined, failure)}
         close={() => setCreativeDialog(null)} />}
+    {opened && project && scriptAi && <ScriptAiDialog
+      scope={scriptAi.scope} episodeTitle={episode?.title} fictional={project.fictional}
+      currentScript={scriptAi.script} aiConfig={aiConfig} busy={busy}
+      onOpenSettings={() => setAiSettingsOpen(true)}
+      onGenerate={(instruction, acceptDraft, failure) => void run(
+        () => api.generateScriptDraft(opened.mediaKey, scriptAi.scope, episode?.id ?? null, scriptAi.script, instruction),
+        acceptDraft, failure,
+      )}
+      onCancel={failure => void api.cancelPlanGeneration(opened.mediaKey).then(reply => {
+        if (!reply.ok) failure(reply.error)
+      }).catch(() => failure('桌面进程连接中断'))}
+      onApply={nextScript => { scriptAi.apply(nextScript); setMessage({ text: 'AI 剧本草案已填入编辑器，请确认后保存' }) }}
+      close={() => { if (!busy) setScriptAi(null) }} />}
     {ask?.kind === 'name' && <NameModal key={ask.title} title={ask.title} initial={ask.initial} confirm={ask.confirm} busy={busy} error={message?.error ? message.text : undefined}
       onClose={() => { if (!busy) { setAsk(null); setMessage(null) } }} onSubmit={name => void ask.action(name).then(ok => { if (ok) setAsk(null) })} />}
     {ask?.kind === 'remove' && <Modal title={ask.title} onClose={() => { if (!busy) { setAsk(null); setMessage(null) } }}>
@@ -575,6 +651,22 @@ export function App() {
       {message?.error && <p className="inline-error" role="alert">{message.text}</p>}
       <div className="dialog-actions"><button onClick={() => setPlayer('')}>关闭预览</button></div>
     </Modal>}
+    {aiSettingsOpen && <AiSettingsDialog config={aiConfig} discoveredModels={discoveredModels} busy={busy}
+      onTest={(next, acceptTest, failure) => void run(() => api.testAiConnection(next), result => {
+        setDiscoveredModels(result.models)
+        setAiConnected(true)
+        acceptTest(result)
+      }, message => {
+        setAiConnected(false)
+        failure(message)
+      })}
+      onSave={(next, failure) => void saveAiConfig(next, failure).then(ok => {
+        if (ok) {
+          setAiSettingsOpen(false)
+          setMessage({ text: 'AI 网关设置已保存' })
+        }
+      })}
+      close={() => setAiSettingsOpen(false)} />}
     {message && !player && ask?.kind !== 'name' && ask?.kind !== 'remove' && ask?.kind !== 'clean-orphans' && <div className={`toast ${message.error ? 'error' : ''}`} role={message.error ? 'alert' : 'status'}>
       {message.error ? <WarningCircle size={19} /> : <Check size={19} />}
       <span>{message.text}</span><button className="icon small subtle" title="关闭提示" aria-label="关闭提示" onClick={() => setMessage(null)}><X size={16} /></button>

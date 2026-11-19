@@ -5,21 +5,28 @@ import { app } from 'electron'
 import type { UpdateKind } from '../shared/api'
 import { Updater } from './updater'
 
-async function updateKind(): Promise<UpdateKind | null> {
-  if (process.platform !== 'win32' || process.arch !== 'x64' || !app.isPackaged) return null
-  const local = process.env.LOCALAPPDATA
-  if (!local || !path.isAbsolute(local) || process.env.PORTABLE_EXECUTABLE_FILE || process.env.PORTABLE_EXECUTABLE_DIR) {
-    return 'portable'
-  }
-  const installed = path.join(local, 'Programs', 'Manju Workbench')
-  const executable = path.join(installed, '漫剧工作台.exe')
-  // The custom NSIS always installs to this directory and writes this uninstaller.
+const installedExecutable = '漫剧工作台.exe'
+const uninstallerNames = ['Uninstall.exe', `Uninstall ${installedExecutable}`]
+
+export async function resolveUpdateKind(options: {
+  platform: NodeJS.Platform
+  arch: string
+  packaged: boolean
+  exePath: string
+  env: NodeJS.ProcessEnv
+}): Promise<UpdateKind | null> {
+  if (options.platform !== 'win32' || options.arch !== 'x64' || !options.packaged) return null
+  if (options.env.PORTABLE_EXECUTABLE_FILE || options.env.PORTABLE_EXECUTABLE_DIR) return 'portable'
+  // Only installations accompanied by a valid uninstaller next to the resolved executable may invoke Setup.
   // Unknown unpacked and portable layouts must never run Setup to update themselves.
   try {
-    const actual = app.getPath('exe')
-    if (path.resolve(actual).toLowerCase() === executable.toLowerCase()
-      && (await realpath(actual)).toLowerCase() === executable.toLowerCase()
-      && (await lstat(path.join(installed, 'Uninstall.exe'))).isFile()) return 'setup'
+    const actual = await realpath(path.resolve(options.exePath))
+    if (path.basename(actual).toLowerCase() !== installedExecutable.toLowerCase()) return 'portable'
+    const installDir = path.dirname(actual)
+    for (const name of uninstallerNames) {
+      const info = await lstat(path.join(installDir, name)).catch(() => null)
+      if (info?.isFile()) return 'setup'
+    }
   } catch {
     // A missing or inaccessible uninstaller does not authorize an in-place update.
   }
@@ -29,7 +36,13 @@ async function updateKind(): Promise<UpdateKind | null> {
 export function createProductionUpdater() {
   return new Updater({
     version: app.getVersion(),
-    kind: updateKind,
+    kind: () => resolveUpdateKind({
+      platform: process.platform,
+      arch: process.arch,
+      packaged: app.isPackaged,
+      exePath: app.getPath('exe'),
+      env: process.env,
+    }),
     temp: app.getPath('temp'),
     request: (url, init) => fetch(url, init),
     launch: file => new Promise<void>((resolve, reject) => {

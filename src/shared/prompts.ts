@@ -162,3 +162,69 @@ export function planningPrompt(project: Project, episode?: Episode) {
     `返回格式（JSON Schema）\n${returnSchema}`,
   ].filter(Boolean).join('\n\n')
 }
+
+export function shotDetailAiPrompt(
+  project: Project,
+  episode: Episode,
+  shot: Shot,
+  kind: DetailKind,
+  currentBody: string,
+  instruction: string,
+) {
+  const index = episode.shots.findIndex(item => item.id === shot.id)
+  const neighbors = {
+    prev: index > 0 ? { title: episode.shots[index - 1].title, dialogue: episode.shots[index - 1].dialogue || undefined } : undefined,
+    next: index >= 0 && index < episode.shots.length - 1
+      ? { title: episode.shots[index + 1].title, dialogue: episode.shots[index + 1].dialogue || undefined }
+      : undefined,
+  }
+  const duration = Number((shot.frames / 30).toFixed(3))
+  const context = {
+    shared: promptSettings(project),
+    episodeTitle: episode.title,
+    shotIndex: index + 1,
+    shotCount: episode.shots.length,
+    neighbors,
+    shot: {
+      title: shot.title,
+      method: externalMethod(shotMethod(project, shot)),
+      frames: shot.frames,
+      seconds: duration,
+      dialogue: shot.dialogue || undefined,
+      legacyIntent: legacyDetail(shot, kind).trim() || undefined,
+    },
+  }
+  return [
+    `请为该镜头编写或优化「${detailLabels[kind]}」正文。只输出提示词正文文本，不要包裹 JSON、代码块围栏或解释性前后缀。`,
+    project.fictional ? '本作品为示例 / 虚构，须保持虚构标识且不引入真实隐私信息。' : '',
+    '严格沿用作品共享设定中的画布规格、风格、角色/场景设定、术语和对应工具要求；如有台词或前后镜头，保持动作与情绪连贯。',
+    instruction.trim() ? `用户补充要求\n${instruction.trim()}` : '目标：将当前草稿改写为可直接用于生成的清晰、具体提示词。',
+    `当前提示词正文\n${currentBody.trim() || '（空）'}`,
+    `镜头与作品上下文\n${JSON.stringify(context)}`,
+  ].filter(Boolean).join('\n\n')
+}
+
+export function scriptAiPrompt(
+  project: Project,
+  scope: 'project' | 'episode',
+  episode: Episode | undefined,
+  currentScript: string,
+  instruction: string,
+) {
+  const context = {
+    scope: scope === 'episode' ? '集数剧本' : '作品总剧本',
+    projectTitle: project.title,
+    episodeTitle: scope === 'episode' ? episode?.title : undefined,
+    projectScript: scope === 'episode' ? (project.script.trim() || undefined) : undefined,
+    shared: promptSettings(project),
+    outline: project.plan?.outline || undefined,
+  }
+  return [
+    `请协助编写或改写「${scope === 'episode' ? '集数剧本' : '作品总剧本'}」。只输出剧本文本本身，不要输出代码块围栏或额外开场/结语说明。`,
+    project.fictional ? '本作品为示例 / 虚构，须继续保留虚构性质。' : '',
+    '结构清晰（可按场次/镜头段落组织画面描述与台词），贴合目标时长、画风与角色设定，方便后续直接拆分为分镜草案。',
+    instruction.trim() ? `用户要求\n${instruction.trim()}` : '目标：结合现有简报与剧本内容，补全并润色成可直接拆分分镜的完整剧本。',
+    `当前剧本文本\n${currentScript.trim() || '（空）'}`,
+    `作品上下文\n${JSON.stringify(context)}`,
+  ].filter(Boolean).join('\n\n')
+}

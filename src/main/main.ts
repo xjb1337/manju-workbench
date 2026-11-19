@@ -6,16 +6,16 @@ import { pathToFileURL } from 'node:url'
 import { z } from 'zod'
 import type { RenderProgress, RenderResult, Reply } from '../shared/api'
 import { extensions, folderNameSchema, idSchema, mediaTargetSchema } from '../shared/model'
-import { frameSpec, generationKindSchema, generationPresets, generationToolUrl } from '../shared/creative'
-import { magpieModelSchema, magpieScriptSchema } from '../shared/plan'
-import { magpiePlanningPrompt } from '../shared/prompts'
-import { generateMagpiePlan } from './magpie'
+import { detailKindSchema, detailTextSchema, frameSpec, generationKindSchema, generationPresets, generationToolUrl } from '../shared/creative'
+import { aiGatewayConfigSchema, aiInstructionSchema, magpieModelSchema, magpieScriptSchema } from '../shared/plan'
+import { magpiePlanningPrompt, scriptAiPrompt, shotDetailAiPrompt } from '../shared/prompts'
+import { generateAiTextDraft, generateMagpiePlan, testAiGateway } from './magpie'
 import { mediaResponse } from './media-protocol'
 import { exportDestination, renderEpisode } from './render'
 import { fillSample, fillVerticalSample } from './sample'
 import { RecentProjects, themeSchema, type WindowBounds } from './recent-projects'
 import { WorkbenchSession } from './session'
-import { findEpisode, ProjectStore } from './storage'
+import { findEpisode, findShot, ProjectStore } from './storage'
 import { cleanupStaleTempDirs, staleTempAgeMs, staleTempPrefixes } from './temp-cleanup'
 import { createProductionUpdater } from './update-system'
 import { InvalidUpdatePackageError, type Updater } from './updater'
@@ -25,6 +25,7 @@ protocol.registerSchemesAsPrivileged([{ scheme: 'manju-media', privileges: { sta
 const html = path.join(__dirname, '../renderer/index.html')
 const rendererUrl = pathToFileURL(html).href
 const resources = path.join(app.getAppPath(), 'resources', 'sample')
+const appIcon = path.join(app.getAppPath(), 'resources', 'icon.png')
 const toolSchema = z.union([generationKindSchema, z.literal('planning')])
 
 let window: BrowserWindow | null = null
@@ -143,6 +144,22 @@ function wire() {
     return project
   }))
   handle('plan:preview', (_win, key, episode, input) => workbench.serial(() => workbench.getStore(key).previewPlan(episode, input)))
+  const runCancellableAi = async <T>(key: unknown, fn: (signal: AbortSignal) => Promise<T | null>): Promise<T | null> => {
+    const controller = new AbortController()
+    workbench.planGeneration = { key, controller }
+    try {
+      const result = await fn(controller.signal)
+      return controller.signal.aborted ? null : result
+    } finally {
+      workbench.planGeneration = null
+    }
+  }
+  handle('ai:get-config', () => recent.aiGateway)
+  handle('ai:set-config', (_win, input) => recent.setAiGateway(aiGatewayConfigSchema.parse(input)))
+  handle('ai:test-connection', (_win, input) => workbench.serial(async () => {
+    const config = aiGatewayConfigSchema.parse(input)
+    return testAiGateway(config.baseUrl, config.model, new AbortController().signal)
+  }))
   handle('plan:generate-magpie', (_win, key, episodeInput, modelInput, scriptInput) => workbench.serial(async () => {
     const store = workbench.getStore(key)
     const episodeId = idSchema.nullable().parse(episodeInput)
@@ -151,16 +168,41 @@ function wire() {
     const project = store.snapshot
     const episode = episodeId ? findEpisode(project, episodeId) : undefined
     if (!episode && project.episodes.length) throw new Error('请先选择要生成分镜的集数')
-    const controller = new AbortController()
-    workbench.planGeneration = { key, controller }
-    try {
-      const draft = await generateMagpiePlan(model, magpiePlanningPrompt(project, episode, script), controller.signal)
-      if (!draft || controller.signal.aborted) return null
+    return runCancellableAi(key, async signal => {
+      const draft = await generateMagpiePlan(model, magpiePlanningPrompt(project, episode, script), signal, recent.aiGateway.baseUrl)
+      if (!draft || signal.aborted) return null
       const staged = episode ? { shots: draft.shots } : { title: draft.title, shots: draft.shots, script }
       return await store.previewPlan(episodeId, JSON.stringify({ schemaVersion: 1, episode: staged }), 'magpie')
-    } finally {
-      workbench.planGeneration = null
-    }
+    })
+  }))
+  handle('ai:generate-shot-detail', (_win, key, episodeInput, shotInput, kindInput, bodyInput, instructionInput) => workbench.serial(async () => {
+    const store = workbench.getStore(key)
+    const episodeId = idSchema.parse(episodeInput)
+    const shotId = idSchema.parse(shotInput)
+    const kind = detailKindSchema.parse(kindInput)
+    const body = detailTextSchema.parse(bodyInput)
+    const instruction = aiInstructionSchema.parse(instructionInput)
+    const project = store.snapshot
+    const episode = findEpisode(project, episodeId)
+    const shot = findShot(project, episodeId, shotId)
+    const { baseUrl, model } = recent.aiGateway
+    return runCancellableAi(key, signal => generateAiTextDraft(
+      model, shotDetailAiPrompt(project, episode, shot, kind, body, instruction), signal, baseUrl,
+    ))
+  }))
+  handle('ai:generate-script', (_win, key, scopeInput, episodeInput, scriptInput, instructionInput) => workbench.serial(async () => {
+    const store = workbench.getStore(key)
+    const scope = z.enum(['project', 'episode']).parse(scopeInput)
+    const episodeId = idSchema.nullable().parse(episodeInput)
+    const script = detailTextSchema.parse(scriptInput)
+    const instruction = aiInstructionSchema.parse(instructionInput)
+    const project = store.snapshot
+    const episode = scope === 'episode' ? (episodeId ? findEpisode(project, episodeId) : undefined) : undefined
+    if (scope === 'episode' && !episode) throw new Error('请先选择要辅助编写的集数')
+    const { baseUrl, model } = recent.aiGateway
+    return runCancellableAi(key, signal => generateAiTextDraft(
+      model, scriptAiPrompt(project, scope, episode, script, instruction), signal, baseUrl,
+    ))
   }))
   handle('plan:cancel-generation', (_win, key) => {
     workbench.cancelPlanGeneration(key)
@@ -282,6 +324,7 @@ function createWindow() {
   const initialBounds = resolveInitialBounds(recent.windowBounds, screen.getAllDisplays())
   const win = new BrowserWindow({
     title: 'AI 视频制作工作台',
+    icon: appIcon,
     width: initialBounds.width,
     height: initialBounds.height,
     ...(initialBounds.x !== undefined && initialBounds.y !== undefined ? { x: initialBounds.x, y: initialBounds.y } : {}),

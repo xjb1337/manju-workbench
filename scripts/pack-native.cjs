@@ -10,8 +10,12 @@ if (!compiler || !unpacked || !destination) {
 
 const source = path.resolve(unpacked)
 const output = path.resolve(destination)
+const icon = path.resolve(__dirname, '..', 'resources', 'icon.ico')
 if (!existsSync(path.join(source, '漫剧工作台.exe')) || !existsSync(path.join(source, 'resources', 'app.asar'))) {
   throw new Error('缺少 Windows 应用归档')
+}
+if (!existsSync(icon)) {
+  throw new Error('缺少应用图标 resources/icon.ico')
 }
 
 function uninstallFiles(directory, prefix = '') {
@@ -42,7 +46,7 @@ try {
   if (!env.NSISDIR && existsSync(path.join(bundledRoot, 'Include', 'MUI2.nsh'))) env.NSISDIR = bundledRoot
   const result = spawnSync(compiler, [
     '-INPUTCHARSET', 'UTF8', '-V2', `-DAPP_SOURCE=${source}`, `-DSETUP_EXE=${candidate}`,
-    `-DAPP_VERSION=${version}`, `-DUNINSTALL_FILES=${manifest}`, path.join(__dirname, 'installer.nsi'),
+    `-DAPP_VERSION=${version}`, `-DAPP_ICON=${icon}`, `-DUNINSTALL_FILES=${manifest}`, path.join(__dirname, 'installer.nsi'),
   ], { env, stdio: 'inherit', shell: false })
   if (result.error) throw result.error
   if (result.status !== 0) throw new Error(`makensis 退出码 ${result.status}`)

@@ -176,6 +176,81 @@ async function verifyMagpieDraft(app, page, file, first) {
   }
 }
 
+async function verifyAiWorkbenchFlows(app, page, file, first) {
+  const before = await documentAt(file)
+  await app.evaluate(() => {
+    const original = globalThis.fetch
+    globalThis.restoreAiFetch = () => { globalThis.fetch = original }
+    globalThis.aiRequests = []
+    globalThis.fetch = async (url, init) => {
+      if (url === 'http://127.0.0.1:11434/v1/models') {
+        return Response.json({ data: [{ id: 'qwen2.5:14b' }, { id: 'llama3.2:latest' }] })
+      }
+      if (url === 'http://127.0.0.1:11434/v1/chat/completions') {
+        const body = JSON.parse(init.body)
+        globalThis.aiRequests.push(body)
+        const promptText = body.messages[0].content
+        if (promptText.includes('编写或改写「作品总剧本」')) {
+          return Response.json({ choices: [{ finish_reason: 'stop', message: { content: 'AI 剧本草案：第一场，观测站脉冲亮起。' } }] })
+        }
+        return Response.json({ choices: [{ finish_reason: 'stop', message: { content: 'AI 优化提示词：深蓝网格与高对比脉冲波形，30fps。' } }] })
+      }
+      return original(url, init)
+    }
+  })
+  try {
+    await button(page, 'AI 设置').click()
+    const settings = page.getByRole('dialog', { name: 'AI 网关设置', exact: true })
+    await settings.getByLabel('网关预设').selectOption('ollama')
+    assert.equal(await settings.getByLabel('网关地址').inputValue(), 'http://127.0.0.1:11434/v1')
+    await button(settings, '测试连接').click()
+    await settings.getByRole('status').getByText(/已连接.*2 个模型/).waitFor()
+    await settings.getByRole('button', { name: 'llama3.2:latest' }).click()
+    assert.equal(await settings.getByLabel('默认模型 ID').inputValue(), 'llama3.2:latest')
+    await button(settings, '保存设置').click()
+    await settings.waitFor({ state: 'hidden' })
+
+    await button(directory(page), '剧本').click()
+    await button(stage(page), 'AI 辅助写剧本').click()
+    const scriptAi = page.getByRole('dialog', { name: 'AI 辅助写剧本', exact: true })
+    await scriptAi.getByLabel(/编写或改写要求/).fill('补充开场脉冲描述')
+    await button(scriptAi, '生成剧本草案').click()
+    const scriptPreview = page.getByRole('dialog', { name: 'AI 剧本草案预览', exact: true })
+    await scriptPreview.getByText('AI 剧本草案：第一场，观测站脉冲亮起。').waitFor()
+    await button(scriptPreview, '应用到编辑器').click()
+    await scriptPreview.waitFor({ state: 'hidden' })
+    assert.equal(await stage(page).getByLabel('剧本').inputValue(), 'AI 剧本草案：第一场，观测站脉冲亮起。')
+    assert.deepEqual(await documentAt(file), before)
+    await button(stage(page), 'AI 生成分镜草案').click()
+    const seededDialog = page.getByRole('dialog', { name: 'AI 生成分镜草案', exact: true })
+    assert.equal(await seededDialog.getByLabel('剧本文本').inputValue(), 'AI 剧本草案：第一场，观测站脉冲亮起。')
+    assert.equal(await seededDialog.getByLabel('模型 ID').inputValue(), 'llama3.2:latest')
+    await button(seededDialog, '取消').click()
+
+    await button(directory(page), '分镜').click()
+    await button(page, '放弃修改').click()
+    await selectStep(page, 'shots')
+    await guide(page).getByRole('button', { name: 'AI 生成分镜草案' }).waitFor()
+    await button(page, `镜头 01 ${first.title}`).click()
+    await page.getByRole('button', { name: /代码任务书/ }).click()
+    const detail = page.getByRole('dialog', { name: /代码任务书/ })
+    await detail.getByLabel('AI 优化要求').fill('强化波形对比度')
+    await button(detail, 'AI 优化提示词').click()
+    await detail.getByText('AI 优化提示词：深蓝网格与高对比脉冲波形，30fps。').waitFor()
+    await button(detail, '放弃建议').click()
+    await button(detail, '关闭').click()
+
+    await button(page, 'AI 设置').click()
+    const resetSettings = page.getByRole('dialog', { name: 'AI 网关设置', exact: true })
+    await resetSettings.getByLabel('网关预设').selectOption('magpie')
+    await button(resetSettings, '保存设置').click()
+    await resetSettings.waitFor({ state: 'hidden' })
+    await button(directory(page), '制作简报').click()
+  } finally {
+    await app.evaluate(() => globalThis.restoreAiFetch())
+  }
+}
+
 async function verifyUpdates(folder, project) {
   const fixture = releaseFixture()
   const temp = path.join(folder, '更新临时目录')
@@ -486,6 +561,7 @@ async function verifyCreative(folder, parent, profile) {
     await screenshot(page, 'creative-03-planning-prompt.png')
     await button(planner, '关闭').click()
     await verifyMagpieDraft(app, page, file, first)
+    await verifyAiWorkbenchFlows(app, page, file, first)
 
     const before = await documentAt(file)
     await button(stage(page), '导入外部规划').click()

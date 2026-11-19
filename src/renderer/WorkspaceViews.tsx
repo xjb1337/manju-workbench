@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { BookOpen, FileText, FilmStrip, Image as ImageIcon, MapPin, Plus, UsersThree } from '@phosphor-icons/react'
+import { BookOpen, FileText, FilmStrip, Image as ImageIcon, MapPin, Plus, Sparkle, UsersThree } from '@phosphor-icons/react'
 import type { OpenProject } from '../shared/api'
 import { activeVersion, timecode, totalFrames, type Category, type Episode, type MediaTarget, type Project, type Reference } from '../shared/model'
 import { MediaRow, TextEditor, mediaUrl, sequence } from './components'
@@ -65,6 +65,8 @@ export function ScriptView({
   onSaveProject,
   onSaveEpisode,
   onRemoveEpisode,
+  onAiAssist,
+  onAiStoryboard,
 }: {
   project: Project
   episode?: Episode
@@ -76,7 +78,20 @@ export function ScriptView({
   onSaveProject: (title: string, script: string) => void
   onSaveEpisode: (title: string, script: string) => void
   onRemoveEpisode: () => void
+  onAiAssist: (scope: 'project' | 'episode', currentScript: string, apply: (next: string) => void) => void
+  onAiStoryboard: (currentScript: string) => void
 }) {
+  const activeScope = scriptScope === 'episode' && episode ? 'episode' : 'project'
+  const renderActions = (draft: { script: string }, applyScript: (next: string) => void) => <>
+    <button type="button" className="small" disabled={busy}
+      onClick={() => onAiAssist(activeScope, draft.script, applyScript)}>
+      <Sparkle size={15} /> AI 辅助写剧本
+    </button>
+    <button type="button" className="small" disabled={busy}
+      onClick={() => onAiStoryboard(draft.script)}>
+      <Sparkle size={15} /> AI 生成分镜草案
+    </button>
+  </>
   return <main className="stage wide">
     <div className="stage-heading"><h2>剧本</h2><div className="actions">
       <button aria-pressed={scriptScope === 'project' || !episode} disabled={busy}
@@ -84,11 +99,11 @@ export function ScriptView({
       <button aria-pressed={scriptScope === 'episode' && !!episode} disabled={busy || !episode}
         onClick={() => { if (scriptScope !== 'episode') onSelectScope('episode') }}>集数剧本</button>
     </div></div>
-    {scriptScope === 'episode' && episode
+    {activeScope === 'episode' && episode
       ? <TextEditor key={episode.id + editorRevision} title={episode.title} name={episode.title} script={episode.script} field="剧本" busy={busy}
-          onDirty={onDirty} onSave={onSaveEpisode} onRemove={onRemoveEpisode} />
+          onDirty={onDirty} onSave={onSaveEpisode} onRemove={onRemoveEpisode} extraActions={renderActions} />
       : <TextEditor key={project.id + editorRevision} title={project.title} name={project.title} script={project.script} field="剧本"
-          busy={busy} onDirty={onDirty} onSave={onSaveProject} />}
+          busy={busy} onDirty={onDirty} onSave={onSaveProject} extraActions={renderActions} />}
   </main>
 }
 

@@ -91,7 +91,7 @@ function parseDuration(raw?: string) {
   return Number.isFinite(value) && value > 0 ? value : undefined
 }
 
-function findShot(project: Project, episodeId: string, shotId: string) {
+export function findShot(project: Project, episodeId: string, shotId: string) {
   const shot = findEpisode(project, episodeId).shots.find(item => item.id === shotId)
   if (!shot) throw new Error('镜头不存在')
   return shot

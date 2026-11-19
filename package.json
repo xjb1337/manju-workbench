@@ -1,6 +1,6 @@
 {
   "name": "manju-workbench",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "description": "本地漫剧制作工作台",
   "author": "Manju Workbench",
@@ -22,16 +22,24 @@
     "files": [
       "dist/**/*",
       "package.json",
-      "resources/sample/*.jpg"
+      "resources/sample/*.jpg",
+      "resources/icon.png"
     ],
     "win": {
       "target": "nsis",
-      "signAndEditExecutable": false
+      "icon": "resources/icon.ico",
+      "signExecutable": false
     },
     "nsis": {
       "artifactName": "Manju-Workbench-${version}-${arch}-Setup.${ext}",
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true,
+      "installerIcon": "resources/icon.ico",
+      "uninstallerIcon": "resources/icon.ico",
+      "installerHeaderIcon": "resources/icon.ico",
+      "include": "scripts/eb-installer.nsh"
     },
     "portable": {
       "artifactName": "Manju-Workbench-${version}-${arch}-Portable.${ext}"

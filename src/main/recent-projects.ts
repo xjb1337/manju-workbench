@@ -4,6 +4,7 @@ import path from 'node:path'
 import { z } from 'zod'
 import type { RecentProject } from '../shared/api'
 import { idSchema, titleSchema } from '../shared/model'
+import { aiGatewayConfigSchema, defaultAiGatewayConfig, type AiGatewayConfig } from '../shared/plan'
 import { atomicJson } from './storage'
 
 const recentLimit = 5
@@ -23,6 +24,7 @@ const preferencesSchema = z.object({
   mediaDirectory: absolutePath.optional(),
   theme: themeSchema.optional(),
   windowBounds: windowBoundsSchema.optional(),
+  aiGateway: aiGatewayConfigSchema.optional(),
 })
 
 function sameDirectory(a: string, b: string) {
@@ -52,6 +54,19 @@ export class RecentProjects {
 
   get windowBounds(): WindowBounds | undefined {
     return this.preferences.windowBounds ? { ...this.preferences.windowBounds } : undefined
+  }
+
+  get aiGateway(): AiGatewayConfig {
+    return this.preferences.aiGateway ? { ...this.preferences.aiGateway } : { ...defaultAiGatewayConfig }
+  }
+
+  async setAiGateway(config: AiGatewayConfig) {
+    const next = aiGatewayConfigSchema.parse(config)
+    const prev = this.preferences.aiGateway
+    if (prev && prev.preset === next.preset && prev.baseUrl === next.baseUrl && prev.model === next.model) return next
+    this.preferences.aiGateway = next
+    await this.save()
+    return { ...next }
   }
 
   async setTheme(theme: Theme) {

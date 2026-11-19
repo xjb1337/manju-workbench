@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type DragEvent, type ReactNode } from 'react'
 import { ArrowDown, ArrowUp, Check, Copy, FilmStrip, Image as ImageIcon, MusicNote, Pause, Play, Plus, Trash, UploadSimple } from '@phosphor-icons/react'
 import type { OpenProject } from '../shared/api'
 import { frameSpec, shotMethod, type Ratio } from '../shared/creative'
@@ -188,9 +188,10 @@ export function PreviewPlayer({ source, ratio, onError }: { source: string; rati
 
 export function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null)
+  const titleId = useId()
   useEffect(() => { dialog.current?.showModal() }, [])
-  return <dialog ref={dialog} aria-label={title} onCancel={event => { event.preventDefault(); onClose() }}>
-    <h2>{title}</h2>{children}
+  return <dialog ref={dialog} aria-labelledby={titleId} onCancel={event => { event.preventDefault(); onClose() }}>
+    <h2 id={titleId}>{title}</h2>{children}
   </dialog>
 }
 
@@ -210,9 +211,10 @@ export function NameModal({ title, initial = '', confirm, busy, error, onClose, 
   </Modal>
 }
 
-export function TextEditor({ title, name, script, field, busy, onSave, onRemove, onDirty }: {
+export function TextEditor({ title, name, script, field, busy, onSave, onRemove, onDirty, extraActions }: {
   title: string; name: string; script: string; field: string; busy: boolean
   onSave: (title: string, text: string) => void; onRemove?: () => void; onDirty: (value: boolean) => void
+  extraActions?: (draft: { name: string; script: string }, applyScript: (next: string) => void) => ReactNode
 }) {
   const [draft, setDraft] = useState({ name, script })
   useEffect(() => { setDraft({ name, script }) }, [name, script])
@@ -221,6 +223,7 @@ export function TextEditor({ title, name, script, field, busy, onSave, onRemove,
   return <form className="text-editor" onSubmit={event => { event.preventDefault(); onSave(draft.name, draft.script) }}>
     <fieldset disabled={busy}>
       <div className="section-head"><h2>{title}</h2><div className="actions">
+        {extraActions?.(draft, next => setDraft(current => ({ ...current, script: next })))}
         {onRemove && <button type="button" className="icon subtle danger" title="删除" aria-label="删除" onClick={onRemove}><Trash size={17} /></button>}
         <button type="submit" className="primary small" disabled={!dirty || !draft.name.trim()}><Check size={17} /> 保存</button>
       </div></div>

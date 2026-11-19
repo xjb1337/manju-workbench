@@ -4,6 +4,7 @@ const { tmpdir } = require('node:os')
 const path = require('node:path')
 const { test } = require('node:test')
 const { Updater } = require('../dist/main/updater')
+const { resolveUpdateKind } = require('../dist/main/update-system')
 const { releasesPath, notes, futureVersion, sha256, executableFixture, releaseFixture, loopbackRequest, atUrl, startUpdateFixture } = require('./update-fixture.cjs')
 
 const version = require('../package.json').version
@@ -227,4 +228,27 @@ test('便携 EXE 和 ZIP 均可校验和打开目录，均不可启动安装器'
     assert.equal(sha256(await readFile(file)), sha256(fixture.bytes))
     assert.deepEqual(launched, [])
   }
+})
+
+test('resolveUpdateKind 支持自定义安装目录识别并区分便携版与未打包目录', async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'manju-kind-test-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const customDir = path.join(dir, 'Custom Folder')
+  const unpackedDir = path.join(dir, 'win-unpacked')
+  const { mkdir } = require('node:fs/promises')
+  await mkdir(customDir, { recursive: true })
+  await mkdir(unpackedDir, { recursive: true })
+  const customExe = path.join(customDir, '漫剧工作台.exe')
+  const unpackedExe = path.join(unpackedDir, '漫剧工作台.exe')
+  await writeFile(customExe, 'exe')
+  await writeFile(path.join(customDir, 'Uninstall.exe'), 'uninstaller')
+  await writeFile(unpackedExe, 'exe')
+
+  assert.equal(await resolveUpdateKind({ platform: 'linux', arch: 'x64', packaged: true, exePath: customExe, env: {} }), null)
+  assert.equal(await resolveUpdateKind({ platform: 'win32', arch: 'x64', packaged: false, exePath: customExe, env: {} }), null)
+  assert.equal(await resolveUpdateKind({
+    platform: 'win32', arch: 'x64', packaged: true, exePath: customExe, env: { PORTABLE_EXECUTABLE_FILE: 'C:\\Portable.exe' },
+  }), 'portable')
+  assert.equal(await resolveUpdateKind({ platform: 'win32', arch: 'x64', packaged: true, exePath: unpackedExe, env: {} }), 'portable')
+  assert.equal(await resolveUpdateKind({ platform: 'win32', arch: 'x64', packaged: true, exePath: customExe, env: {} }), 'setup')
 })

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { DownloadSimple, FileText, FilmStrip, Image as ImageIcon, Pause, Play, Plus, SpeakerHigh, SpeakerSlash } from '@phosphor-icons/react'
+import { DownloadSimple, FileText, FilmStrip, Image as ImageIcon, Pause, Play, Plus, Sparkle, SpeakerHigh, SpeakerSlash } from '@phosphor-icons/react'
 import type { OpenProject } from '../shared/api'
 import { frameSpec, usesFinishedVideo, usesTrack, type ShotMethod } from '../shared/creative'
 import { extensions, shotVisual, timecode, totalFrames, type Episode, type MediaKind, type MediaTarget, type Shot } from '../shared/model'
@@ -29,6 +29,8 @@ export function ShotStage({
   onPreview,
   onExport,
   onAddPrimary,
+  onMagpie,
+  onImportPlan,
   onSelectShot,
   onAddShot,
   onMoveShot,
@@ -50,6 +52,8 @@ export function ShotStage({
   onPreview: () => void
   onExport: () => void
   onAddPrimary: () => void
+  onMagpie: () => void
+  onImportPlan: () => void
   onSelectShot: (id: string) => void
   onAddShot: () => void
   onMoveShot: (direction: -1 | 1) => void
@@ -157,7 +161,11 @@ export function ShotStage({
         <span>{timecode(shot.frames, true)} <span className="monitor-divider">/</span> 30 fps</span>
       </div>
     </section> : <Empty icon={<FilmStrip size={38} weight="duotone" />}>
-      <button className="primary" disabled={busy} onClick={onAddPrimary}><Plus size={18} /> {episode ? '新建镜头' : '新建集数'}</button>
+      <div className="empty-actions">
+        <button className="primary" disabled={busy} onClick={onMagpie}><Sparkle size={18} /> AI 生成分镜草案</button>
+        <button disabled={busy} onClick={onAddPrimary}><Plus size={18} /> {episode ? '新建镜头' : '新建集数'}</button>
+        <button className="subtle" disabled={busy} onClick={onImportPlan}>导入外部规划</button>
+      </div>
     </Empty>}
     {episode && !!episode.shots.length && <Timeline opened={opened} episode={episode} shotId={shot?.id} busy={busy}
       onSelect={onSelectShot}

@@ -1,7 +1,8 @@
 const assert = require('node:assert/strict')
 const { test } = require('node:test')
 const { extractJsonObject, parseMagpieDraft, parsePlan } = require('../dist/main/plan-import')
-const { generateMagpiePlan } = require('../dist/main/magpie')
+const { generateAiTextDraft, generateMagpiePlan, stripPlainTextCompletion, testAiGateway } = require('../dist/main/magpie')
+const { aiBaseUrlSchema } = require('../dist/shared/plan')
 
 async function withMockFetch(mock, run) {
   const original = globalThis.fetch
@@ -228,4 +229,67 @@ test('generateMagpiePlan 处理网络 TypeError、AbortSignal 取消与超 4 MiB
     /Magpie 响应过大/,
   ))
   assert.equal(cancelled, true)
+})
+
+test('generateMagpiePlan 支持自定义 OpenAI 兼容网关地址且不附带 Magpie 令牌', async () => {
+  let seen
+  const episode = await withMockFetch(async (url, init) => {
+    seen = { url, init }
+    return completionResponse(JSON.stringify(validMagpiePlan))
+  }, () => generateMagpiePlan('qwen2.5:14b', '示例剧本', new AbortController().signal, 'http://127.0.0.1:11434/v1///'))
+
+  assert.equal(seen.url, 'http://127.0.0.1:11434/v1/chat/completions')
+  assert.equal(seen.init.headers.Authorization, undefined)
+  assert.equal(episode.title, '第一集')
+})
+
+test('testAiGateway 支持 /models 探测、404 回退探测与不可达报错', async () => {
+  const listed = await withMockFetch(async (url, init) => {
+    assert.equal(url, 'http://127.0.0.1:11434/v1/models')
+    assert.equal(init.method, 'GET')
+    return new Response(JSON.stringify({ data: [{ id: 'qwen2.5:14b' }, { id: 'qwen2.5:14b' }, { id: 'llama3.2' }] }), { status: 200 })
+  }, () => testAiGateway('http://127.0.0.1:11434/v1/', 'qwen2.5:14b', new AbortController().signal))
+  assert.deepEqual(listed.models, ['qwen2.5:14b', 'llama3.2'])
+  assert.equal(listed.probedByCompletion, undefined)
+
+  let calls = 0
+  const fallback = await withMockFetch(async url => {
+    calls++
+    if (url.endsWith('/models')) return new Response('not found', { status: 404 })
+    return completionResponse('ok')
+  }, () => testAiGateway('http://127.0.0.1:1234/v1', 'local-model', new AbortController().signal))
+  assert.equal(calls, 2)
+  assert.equal(fallback.probedByCompletion, true)
+
+  await withMockFetch(
+    async () => { throw new TypeError('connect ECONNREFUSED') },
+    () => assert.rejects(
+      testAiGateway('http://192.168.1.50:11434/v1', 'qwen2.5:14b', new AbortController().signal),
+      /无法连接 AI 网关.*192\.168\.1\.50:11434/,
+    ),
+  )
+})
+
+test('stripPlainTextCompletion 与 generateAiTextDraft 清洗 think 块与围栏并校验空内容', async () => {
+  assert.equal(stripPlainTextCompletion('\uFEFF<think>推理</think>\n```\n第一镜：全景推进\n```'), '第一镜：全景推进')
+
+  const drafted = await withMockFetch(
+    async () => completionResponse('<think>分析光影</think>\n```markdown\n主体：少年站在雨夜巷口\n```'),
+    () => generateAiTextDraft('qwen2.5:14b', '优化提示词', new AbortController().signal, 'http://127.0.0.1:11434/v1'),
+  )
+  assert.equal(drafted, '主体：少年站在雨夜巷口')
+
+  await withMockFetch(
+    async () => completionResponse('<think>只有思考</think>'),
+    () => assert.rejects(
+      generateAiTextDraft('qwen2.5:14b', '优化提示词', new AbortController().signal),
+      /模型未返回可用文本/,
+    ),
+  )
+})
+
+test('aiBaseUrlSchema 规范化尾部斜杠并拒绝携带凭据或非法协议', () => {
+  assert.equal(aiBaseUrlSchema.parse('http://127.0.0.1:11434/v1///'), 'http://127.0.0.1:11434/v1')
+  assert.throws(() => aiBaseUrlSchema.parse('http://user:secret@127.0.0.1:3425/v1'), /不含账号密码/)
+  assert.throws(() => aiBaseUrlSchema.parse('file:///C:/test'), /有效的 http:\/\/ 或 https:\/\//)
 })
