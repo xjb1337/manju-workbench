@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
-import { copyFile, lstat, mkdir, open, readFile, realpath, rename, rm, rmdir } from 'node:fs/promises'
+import { copyFile, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, rmdir } from 'node:fs/promises'
 import path from 'node:path'
 import { lock } from 'proper-lockfile'
 import {
@@ -21,6 +21,19 @@ const directoryName = 'media'
 const maxProjectBytes = 32 * 1024 * 1024
 const maxMediaBytes = 4 * 1024 ** 3
 
+export async function safeRename(from: string, to: string) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(from, to)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (process.platform !== 'win32' || (code !== 'EPERM' && code !== 'EBUSY') || attempt >= 4) throw error
+      await new Promise(resolve => setTimeout(resolve, 30 * 2 ** attempt))
+    }
+  }
+}
+
 export async function atomicJson(file: string, value: unknown, beforePublish?: () => Promise<void>) {
   const temp = path.join(path.dirname(file), `.${randomUUID()}.tmp`)
   const json = JSON.stringify(value, null, 2) + '\n'
@@ -34,7 +47,7 @@ export async function atomicJson(file: string, value: unknown, beforePublish?: (
       await handle.close()
     }
     await beforePublish?.()
-    await rename(temp, file)
+    await safeRename(temp, file)
     // POSIX directory sync also persists the renamed entry when available.
     if (process.platform !== 'win32') {
       const parent = await open(path.dirname(file), 'r').catch(() => undefined)
@@ -72,6 +85,12 @@ export function findEpisode(project: Project, id: string) {
   return episode
 }
 
+function parseDuration(raw?: string) {
+  if (!raw?.trim()) return undefined
+  const value = Number(raw)
+  return Number.isFinite(value) && value > 0 ? value : undefined
+}
+
 function findShot(project: Project, episodeId: string, shotId: string) {
   const shot = findEpisode(project, episodeId).shots.find(item => item.id === shotId)
   if (!shot) throw new Error('镜头不存在')
@@ -99,6 +118,29 @@ function setOmitted(shot: Shot, kind: MediaKind, omitted: boolean) {
 
 function resumeMedia(project: Project, target: MediaTarget) {
   if (target.scope === 'shot') setOmitted(findShot(project, target.episodeId, target.shotId), target.kind, false)
+}
+
+function duplicateShotTitle(raw: string) {
+  const suffix = ' 副本'
+  const base = raw.trim()
+  if (`${base}${suffix}`.length <= 100) return `${base}${suffix}`
+  let trimmed = ''
+  for (const char of base) {
+    if (trimmed.length + char.length + suffix.length > 100) break
+    trimmed += char
+  }
+  return `${trimmed.trimEnd()}${suffix}`
+}
+
+function cloneShotDetails(source: Shot['details']): Shot['details'] | undefined {
+  if (!source) return undefined
+  const cloned: NonNullable<Shot['details']> = {}
+  for (const [kind, detail] of Object.entries(source) as [keyof NonNullable<Shot['details']>, NonNullable<Shot['details']>[keyof NonNullable<Shot['details']>]][]) {
+    if (!detail) continue
+    const { needsUpdate: _ignored, ...rest } = detail
+    cloned[kind] = { ...rest }
+  }
+  return Object.keys(cloned).length ? cloned : undefined
 }
 
 function mutate(project: Project, change: Mutation) {
@@ -154,6 +196,29 @@ function mutate(project: Project, change: Mutation) {
       })
       break
     }
+    case 'shot.duplicate': {
+      const episode = findEpisode(project, change.episodeId)
+      if (episode.shots.length >= 500) throw new Error('每集最多保留 500 个镜头')
+      const index = episode.shots.findIndex(shot => shot.id === change.shotId)
+      if (index < 0) throw new Error('镜头不存在')
+      const source = episode.shots[index]
+      const details = cloneShotDetails(source.details)
+      const duplicate: Shot = {
+        id: randomUUID(),
+        title: duplicateShotTitle(source.title),
+        frames: source.frames,
+        dialogue: source.dialogue,
+        prompt: source.prompt,
+        ...(source.videoPrompt !== undefined && { videoPrompt: source.videoPrompt }),
+        ...(source.method !== undefined && { method: source.method }),
+        status: '待制作',
+        media: { image: emptyTrack(), video: emptyTrack(), audio: emptyTrack() },
+        ...(source.omittedMedia && { omittedMedia: { ...source.omittedMedia } }),
+        ...(details && { details }),
+      }
+      episode.shots.splice(index + 1, 0, duplicate)
+      break
+    }
     case 'shot.edit':
       Object.assign(findShot(project, change.episodeId, change.shotId), change.fields)
       break
@@ -191,6 +256,16 @@ function mutate(project: Project, change: Mutation) {
       resumeMedia(project, change.target)
       break
     }
+    case 'media.remove': {
+      const track = trackFor(project, change.target)
+      const index = track.versions.findIndex(version => version.id === change.versionId)
+      if (index < 0) throw new Error('素材版本不存在')
+      track.versions.splice(index, 1)
+      if (track.activeId === change.versionId) {
+        track.activeId = track.versions.at(-1)?.id ?? null
+      }
+      break
+    }
   }
 }
 
@@ -203,8 +278,20 @@ export function allVersions(project: Project) {
 export class ProjectStore {
   private tail: Promise<unknown> = Promise.resolve()
   private pendingPlan?: { token: string; base: Project; staged: ReturnType<typeof stagePlan> }
+  private versionIndex = new Map<string, Version>()
 
-  private constructor(readonly root: string, private document: Project, private savedJson: string) {}
+  private constructor(readonly root: string, private document: Project, private savedJson: string) {
+    this.rebuildVersionIndex()
+  }
+
+  private rebuildVersionIndex() {
+    this.versionIndex = new Map(allVersions(this.document).map(version => [version.id, version]))
+  }
+
+  findVersion(id: string): Version | undefined {
+    const version = this.versionIndex.get(id)
+    return version ? { ...version } : undefined
+  }
 
   static async create(parent: string, titleInput: string, fictional = false) {
     const title = folderNameSchema.parse(titleInput)
@@ -271,6 +358,7 @@ export class ProjectStore {
         }
       })
       this.document = valid
+      this.rebuildVersionIndex()
       return this.snapshot
     } finally {
       await release().catch(error => console.error('project:release-lock', error))
@@ -281,9 +369,61 @@ export class ProjectStore {
     const change = mutationSchema.parse(input)
     return this.queue(async () => {
       const next = this.snapshot
+      const removedVersion = change.type === 'media.remove' ? this.findVersion(change.versionId) : undefined
       mutate(next, change)
-      return this.commit(next)
+      const committed = await this.commit(next)
+      if (removedVersion && !this.versionIndex.has(removedVersion.id)) {
+        await this.removeMediaFile(removedVersion)
+      }
+      return committed
     })
+  }
+
+  private async removeMediaFile(version: Version) {
+    try {
+      const directory = await checkedDirectory(path.join(this.root, directoryName))
+      const file = path.join(directory, `${version.id}.${version.extension}`)
+      const stats = await lstat(file).catch(() => undefined)
+      if (stats?.isFile()) await rm(file, { force: true })
+    } catch {
+      // Best-effort cleanup after project metadata has been committed.
+    }
+  }
+
+  private async scanOrphanMedia(remove: boolean): Promise<{ count: number; bytes: number }> {
+    const directory = await checkedDirectory(path.join(this.root, directoryName))
+    const normalizeName = (name: string) => (process.platform === 'win32' ? name.toLowerCase() : name)
+    const referenced = new Set(
+      Array.from(this.versionIndex.values(), version => normalizeName(`${version.id}.${version.extension}`)),
+    )
+    const entries = await readdir(directory, { withFileTypes: true })
+    let count = 0
+    let bytes = 0
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue
+      if (referenced.has(normalizeName(entry.name))) continue
+      const file = path.join(directory, entry.name)
+      const stats = await lstat(file).catch(() => undefined)
+      if (!stats?.isFile()) continue
+      if (remove) {
+        try {
+          await rm(file)
+        } catch {
+          continue
+        }
+      }
+      count += 1
+      bytes += stats.size
+    }
+    return { count, bytes }
+  }
+
+  inspectOrphanMedia() {
+    return this.queue(() => this.scanOrphanMedia(false))
+  }
+
+  cleanOrphanMedia() {
+    return this.queue(() => this.scanOrphanMedia(true))
   }
 
   previewPlan(episodeInput: unknown, input: unknown, source: 'import' | 'magpie' = 'import'): Promise<PlanPreview> {
@@ -360,8 +500,8 @@ export class ProjectStore {
         }
         const imageCodec = ({ jpg: 'mjpeg', jpeg: 'mjpeg', png: 'png', webp: 'webp' } as Record<string, string>)[extension]
         if (kind === 'image' && stream.codec_name !== imageCodec) throw new Error('文件内容与素材类型不匹配')
-        const seconds = kind === 'image' ? undefined : Number(stream.duration ?? info.format.duration)
-        if (seconds !== undefined && (!Number.isFinite(seconds) || seconds <= 0 || seconds > 86_400)) {
+        const seconds = kind === 'image' ? undefined : (parseDuration(stream.duration) ?? parseDuration(info.format.duration))
+        if (kind !== 'image' && (seconds === undefined || seconds > 86_400)) {
           throw new Error('素材时长须大于 0 且不超过 24 小时')
         }
         await runTool('ffmpeg', [
@@ -371,10 +511,11 @@ export class ProjectStore {
         ], { signal })
         const handle = await open(temp, 'r+')
         try { await handle.sync() } finally { await handle.close() }
-        await rename(temp, file)
+        await safeRename(temp, file)
         archived = true
         const version = versionSchema.parse({
-          id, name: path.basename(source), extension, createdAt: new Date().toISOString(), seconds,
+          id, name: path.basename(source), extension, createdAt: new Date().toISOString(),
+          ...(seconds !== undefined && { seconds }),
           ...(kind === 'video' && { hasAudio: !!audio }),
         })
         track.versions.push(version)

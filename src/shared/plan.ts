@@ -3,13 +3,17 @@ import { detailTextSchema, planNotesSchema, type ShotMethod } from './creative'
 import { idSchema, shotFields, titleSchema } from './model'
 
 const packageBody = detailTextSchema.trim().min(1).optional()
+// External plans use neutral `image-video` / `video-only` / `details.video` keys;
+// v1/v2 stored projects retain historical `flow` / `flow-only` / `details.flow` keys for compatibility.
 const planMethod = z.enum(['image-video', 'image', 'video-only', 'code', 'imported'])
 type PlanMethod = z.infer<typeof planMethod>
 
+/** Translates internal `ShotMethod` (`flow` / `flow-only`) to external plan method names. */
 export function externalMethod(method: ShotMethod): PlanMethod {
   return method === 'flow' ? 'image-video' : method === 'flow-only' ? 'video-only' : method
 }
 
+/** Translates external plan method names back to internal `ShotMethod` (`flow` / `flow-only`). */
 export function storedMethod(method: PlanMethod): ShotMethod {
   return method === 'image-video' ? 'flow' : method === 'video-only' ? 'flow-only' : method
 }

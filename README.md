@@ -13,13 +13,12 @@ npm run dev
 
 生产构建成功后可直接运行 `npm start`。使用 Windows 安装包或便携包也需另行安装 FFmpeg，并将 `ffmpeg` 和 `ffprobe` 加入系统 PATH。
 
-## 1.2.0 发布说明
+## 1.3.0 发布说明
 
-- 旧作品首次保存时迁移到格式 2。若需继续用 1.1.0 或更早版本打开，请先备份整个作品目录。
-- 「制作简报 → AI 生成分镜草案」可通过本机 Magpie 网关拆分剧本，预览并确认后合并到作品。
-- 可按作品配置生图和视频制作工具。工具名称会随提示词复制，生成的媒体可手工导入。
-- 增加最近作品和上次导入路径。统一镜头预览和导出的画面选择，导出前提示静态图或黑底回退，长字幕按页显示。
-- 修复并行保存覆盖、已失效的素材仍显示完成，以及更新包校验失败后无法重新下载等问题。
+- 媒体协议改为基于项目索引的 O(1) 查找与 LRU 缓存；FFmpeg 预览/导出引入有限并发、会话级镜头分片缓存与平滑进度，改善中英混排字幕折行。
+- 增强 Magpie 与外部规划 JSON 的容错提取；支持删除无效或多余的素材版本并清理孤儿素材文件。
+- 生产工作区新增镜头快捷复制、拖拽导入参考图/视频/配音、单镜与配音独立试听以及常用快捷键；持久化窗口位置大小与深色/浅色主题。
+- 拆分主进程会话管理、临时文件清理、窗口状态与渲染进程视图模块，提升可维护性。
 
 应用未签名，SHA-256 用于校验文件完整性。使用安装包或便携包时需另行安装 FFmpeg。
 
@@ -72,10 +71,10 @@ xvfb-run -a -s '-screen 0 1600x1050x24' npm run verify:desktop
 ```sh
 npm run build
 npx electron-builder --win --dir --x64
-npm run pack:win:native -- /path/to/makensis release/win-unpacked release/Manju-Workbench-1.2.0-x64-Setup.exe
+npm run pack:win:native -- /path/to/makensis release/win-unpacked release/Manju-Workbench-1.3.0-x64-Setup.exe
 ```
 
-自定义安装程序按用户安装到 `%LOCALAPPDATA%\Programs\Manju Workbench`，目录中包含 `漫剧工作台.exe` 和 `Uninstall.exe`。使用以下命令生成 `release/Manju-Workbench-1.2.0-x64-Portable.exe`。
+自定义安装程序按用户安装到 `%LOCALAPPDATA%\Programs\Manju Workbench`，目录中包含 `漫剧工作台.exe` 和 `Uninstall.exe`。使用以下命令生成 `release/Manju-Workbench-1.3.0-x64-Portable.exe`。
 
 ```sh
 npm run build
@@ -84,16 +83,16 @@ npx electron-builder --win portable --x64
 
 ## 更新发布清单
 
-标题栏的「检查更新」按需读取 `xjb1337/manju-workbench` 的正式 GitHub Release。1.2.0 的标签可使用 `1.2.0` 或 `v1.2.0`。随 Release 提供 `Manju-Workbench-1.2.0-win-x64.manifest.json`（UTF-8 JSON），所有更新附件的下载地址必须逐字匹配 `https://github.com/xjb1337/manju-workbench/releases/download/<tag>/<fileName>`。
+标题栏的「检查更新」按需读取 `xjb1337/manju-workbench` 的正式 GitHub Release。1.3.0 的标签可使用 `1.3.0` 或 `v1.3.0`。随 Release 提供 `Manju-Workbench-1.3.0-win-x64.manifest.json`（UTF-8 JSON），所有更新附件的下载地址必须逐字匹配 `https://github.com/xjb1337/manju-workbench/releases/download/<tag>/<fileName>`。
 
 便携版与其他打包的 Windows x64 目录可下载便携包并自行替换。已校验的便携包保留在系统临时目录。
 
-- 根对象包含 `schemaVersion`（数字 `1`）、`version`（字符串 `"1.2.0"`）和 `assets`（1–2 项）。
+- 根对象包含 `schemaVersion`（数字 `1`）、`version`（字符串 `"1.3.0"`）和 `assets`（1–2 项）。
 - 每条附件包含 `fileName`、`size`（1 字节至 2 GiB，整数）、`sha256`（64 位十六进制）和 `kind`。每种类型最多一份，名称须与附件逐字匹配。
-- `setup` 使用自定义 NSIS 产物 `Manju-Workbench-1.2.0-x64-Setup.exe`。`portable` 使用 `Manju-Workbench-1.2.0-x64-Portable.exe` 或 `Manju-Workbench-1.2.0-x64-Portable.zip`。
+- `setup` 使用自定义 NSIS 产物 `Manju-Workbench-1.3.0-x64-Setup.exe`。`portable` 使用 `Manju-Workbench-1.3.0-x64-Portable.exe` 或 `Manju-Workbench-1.3.0-x64-Portable.zip`。
 
-打包完成后，将最终附件路径传给本地脚本。清单写入第一个附件所在的目录。传入一份附件也可生成清单。`--sha256` 可另外生成 `Manju-Workbench-1.2.0-win-x64.sha256.txt`。
+打包完成后，将最终附件路径传给本地脚本。清单写入第一个附件所在的目录。传入一份附件也可生成清单。`--sha256` 可另外生成 `Manju-Workbench-1.3.0-win-x64.sha256.txt`。
 
 ```sh
-node scripts/write-update-manifest.cjs --sha256 release/Manju-Workbench-1.2.0-x64-Setup.exe release/Manju-Workbench-1.2.0-x64-Portable.exe
+node scripts/write-update-manifest.cjs --sha256 release/Manju-Workbench-1.3.0-x64-Setup.exe release/Manju-Workbench-1.3.0-x64-Portable.exe
 ```

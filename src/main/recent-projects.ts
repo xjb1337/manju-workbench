@@ -8,12 +8,32 @@ import { atomicJson } from './storage'
 
 const recentLimit = 5
 const absolutePath = z.string().refine(path.isAbsolute)
+export const themeSchema = z.enum(['light', 'dark'])
+export type Theme = z.infer<typeof themeSchema>
+export const windowBoundsSchema = z.object({
+  width: z.number().int().min(940).max(10000),
+  height: z.number().int().min(650).max(10000),
+  x: z.number().int().optional(),
+  y: z.number().int().optional(),
+  maximized: z.boolean().optional(),
+})
+export type WindowBounds = z.infer<typeof windowBoundsSchema>
 const preferencesSchema = z.object({
   recent: z.array(z.object({ id: idSchema, title: titleSchema, directory: absolutePath, fictional: z.boolean() })).max(recentLimit),
   mediaDirectory: absolutePath.optional(),
+  theme: themeSchema.optional(),
+  windowBounds: windowBoundsSchema.optional(),
 })
 
+function sameDirectory(a: string, b: string) {
+  const left = path.normalize(a)
+  const right = path.normalize(b)
+  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
+}
+
 export class RecentProjects {
+  private saveTail: Promise<void> = Promise.resolve()
+
   private constructor(private file: string, private preferences: z.infer<typeof preferencesSchema>) {}
 
   static async open(userData: string) {
@@ -26,17 +46,49 @@ export class RecentProjects {
     return this.preferences.recent
   }
 
+  get theme(): Theme | undefined {
+    return this.preferences.theme
+  }
+
+  get windowBounds(): WindowBounds | undefined {
+    return this.preferences.windowBounds ? { ...this.preferences.windowBounds } : undefined
+  }
+
+  async setTheme(theme: Theme) {
+    const next = themeSchema.parse(theme)
+    if (this.preferences.theme === next) return
+    this.preferences.theme = next
+    await this.save()
+  }
+
+  async setWindowBounds(bounds: WindowBounds) {
+    const next = windowBoundsSchema.parse(bounds)
+    const prev = this.preferences.windowBounds
+    if (
+      prev
+      && prev.width === next.width
+      && prev.height === next.height
+      && prev.x === next.x
+      && prev.y === next.y
+      && prev.maximized === next.maximized
+    ) {
+      return
+    }
+    this.preferences.windowBounds = next
+    await this.save()
+  }
+
   async remember(project: Omit<RecentProject, 'id'>) {
-    const previous = this.entries.find(item => item.directory === project.directory)
+    const previous = this.entries.find(item => sameDirectory(item.directory, project.directory))
     if (previous === this.entries[0] && previous?.title === project.title && previous.fictional === project.fictional) return
     this.preferences.recent = [{ ...project, id: previous?.id ?? randomUUID() },
-      ...this.entries.filter(item => item !== previous)].slice(0, recentLimit)
+      ...this.entries.filter(item => !sameDirectory(item.directory, project.directory))].slice(0, recentLimit)
     await this.save()
   }
 
   async rememberMedia(file: string) {
     const directory = path.dirname(file)
-    if (directory === this.preferences.mediaDirectory) return
+    if (this.preferences.mediaDirectory && sameDirectory(directory, this.preferences.mediaDirectory)) return
     this.preferences.mediaDirectory = directory
     await this.save()
   }
@@ -49,7 +101,11 @@ export class RecentProjects {
     }
   }
 
-  private async save() {
-    await atomicJson(this.file, this.preferences).catch(error => console.error('preferences:save', error))
+  private save() {
+    const run = this.saveTail.then(async () => {
+      await atomicJson(this.file, this.preferences).catch(error => console.error('preferences:save', error))
+    })
+    this.saveTail = run
+    return run
   }
 }

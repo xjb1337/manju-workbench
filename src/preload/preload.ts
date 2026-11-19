@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { RenderProgress, UpdateProgress, Workbench } from '../shared/api'
 
 const bridge: Workbench = {
@@ -13,6 +13,19 @@ const bridge: Workbench = {
   cancelPlanGeneration: key => ipcRenderer.invoke('plan:cancel-generation', key),
   mergePlan: (key, token, replacements) => ipcRenderer.invoke('plan:merge', key, token, replacements),
   importMedia: (key, target) => ipcRenderer.invoke('project:import', key, target),
+  importDroppedMedia: async (key, target, file) => {
+    if (!(file instanceof File)) return { ok: false, error: '无法读取拖入的本地文件' }
+    let filePath = ''
+    try {
+      filePath = webUtils.getPathForFile(file)
+    } catch {
+      filePath = ''
+    }
+    if (!filePath) return { ok: false, error: '无法读取拖入的本地文件' }
+    return ipcRenderer.invoke('project:import-dropped', key, target, filePath)
+  },
+  inspectOrphanMedia: key => ipcRenderer.invoke('media:inspect-orphans', key),
+  cleanOrphanMedia: key => ipcRenderer.invoke('media:clean-orphans', key),
   copy: text => ipcRenderer.invoke('app:copy', text),
   openTool: (key, tool) => ipcRenderer.invoke('app:open-tool', key, tool),
   render: (key, episodeId, mode) => ipcRenderer.invoke('episode:render', key, episodeId, mode),
@@ -33,5 +46,6 @@ const bridge: Workbench = {
     return () => ipcRenderer.removeListener('update:progress', handler)
   },
   setEditorDirty: dirty => ipcRenderer.invoke('app:editor-dirty', dirty),
+  setTheme: theme => ipcRenderer.invoke('app:set-theme', theme),
 }
 contextBridge.exposeInMainWorld('workbench', bridge)

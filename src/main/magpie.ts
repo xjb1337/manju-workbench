@@ -56,8 +56,7 @@ export async function generateMagpiePlan(model: string, prompt: string, signal: 
     if (choice.finish_reason === 'length') throw new Error('模型响应被截断，请缩短剧本或分段生成')
     const content = choice.message.content?.trim()
     if (!content) throw new Error('模型未返回分镜内容，请尝试其他 Magpie 模型')
-    const unwrapped = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(content)?.[1] ?? content
-    const { episode } = parseMagpieDraft(unwrapped)
+    const { episode } = parseMagpieDraft(content)
     if (!episode.shots.length) throw new Error('模型没有生成镜头，请补充动作或台词后再试')
     return episode
   } catch (error) {

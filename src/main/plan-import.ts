@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { detailKindSchema, detailLabels, methodLabels, shotMethod } from '../shared/creative'
+import { detailKindSchema, detailLabels, externalDetailKey, methodLabels, shotMethod } from '../shared/creative'
 import { emptyTrack, type Episode, type Project, type Shot } from '../shared/model'
 import { externalMethod, externalPlanSchema, magpiePlanSchema, maxPlanCharacters, storedMethod, type ExternalPlan, type PlanChange } from '../shared/plan'
 import { legacyDetail } from '../shared/prompts'
@@ -22,10 +22,90 @@ function normalizeOldPlan(data: unknown) {
   }
 }
 
+function canParseJson(text: string): boolean {
+  try {
+    JSON.parse(text)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function extractSingleCodeFence(text: string): string | null {
+  const lineFences = [...text.matchAll(/^[ \t]*```(?:json)?[ \t]*\r?\n([\s\S]*?)^[ \t]*```[ \t]*\r?$/gim)]
+  if (lineFences.length === 1) return lineFences[0][1].trim()
+  if (lineFences.length > 1) return null
+
+  const inlineFences = [...text.matchAll(/```(?:json)?[ \t]*\r?\n?([\s\S]*?)```/gi)]
+  if (inlineFences.length !== 1) return null
+  const [match] = inlineFences
+  const before = text.slice(0, match.index)
+  const inner = match[1].trim()
+  if (before.includes('{') && !canParseJson(inner)) return null
+  return inner
+}
+
+function findBalancedJsonObjects(text: string): string[] {
+  const results: string[] = []
+  let i = 0
+  while (i < text.length) {
+    const start = text.indexOf('{', i)
+    if (start === -1) break
+    let depth = 0
+    let inString = false
+    let escape = false
+    let end = -1
+    for (let j = start; j < text.length; j++) {
+      const ch = text[j]
+      if (inString) {
+        if (escape) {
+          escape = false
+        } else if (ch === '\\') {
+          escape = true
+        } else if (ch === '"') {
+          inString = false
+        }
+        continue
+      }
+      if (ch === '"') {
+        inString = true
+      } else if (ch === '{') {
+        depth++
+      } else if (ch === '}') {
+        depth--
+        if (depth === 0) {
+          end = j
+          break
+        }
+      }
+    }
+    if (end === -1) break
+    results.push(text.slice(start, end + 1))
+    i = end + 1
+  }
+  return results
+}
+
+export function extractJsonObject(input: string): string {
+  let text = input.replace(/^\uFEFF/, '')
+  text = text.replace(/^(?:\s*<think(?:\s[^>]*)?>[\s\S]*?<\/think>)+/i, '').trim()
+  if (canParseJson(text)) return text
+
+  const fenced = extractSingleCodeFence(text)
+  if (fenced !== null) {
+    text = fenced
+    if (canParseJson(text)) return text
+  }
+
+  const candidates = findBalancedJsonObjects(text)
+  if (candidates.length === 0) return text
+  return candidates.find(canParseJson) ?? candidates[0]
+}
+
 function parsePlanningJson<T>(input: unknown, schema: z.ZodType<T>) {
   if (typeof input !== 'string' || input.length > maxPlanCharacters) throw new Error('规划 JSON 最多 1,000,000 个字符')
   let data: unknown
-  try { data = JSON.parse(input.replace(/^\uFEFF/, '')) }
+  try { data = JSON.parse(extractJsonObject(input)) }
   catch { throw new Error('规划 JSON 无法解析，请粘贴完整的 JSON 对象') }
   normalizeOldPlan(data)
   const parsed = schema.safeParse(data)
@@ -115,7 +195,7 @@ export function stagePlan(next: Project, episodeId: string | null, input: unknow
       }
       if (entry.dialogue !== undefined) add(label, '台词', shot.dialogue, entry.dialogue, () => { shot.dialogue = entry.dialogue! })
       for (const kind of detailKindSchema.options) {
-        const body = entry.details?.[kind === 'flow' ? 'video' : kind]
+        const body = entry.details?.[externalDetailKey(kind)]
         if (body === undefined) continue
         const existing = shot.details?.[kind]
         add(label, detailLabels[kind], existing?.body ?? legacyDetail(shot, kind), body,
