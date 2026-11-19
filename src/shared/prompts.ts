@@ -101,6 +101,18 @@ export function shotPromptBody(project: Project, episode: Episode, shot: Shot, k
   return template + direction.slice(0, 30_000 - template.length)
 }
 
+export function voiceDialoguePreview(shot: Shot) {
+  const voice = shot.details?.voice
+  if (!voice?.body.trim()) return null
+  const voiceBody = voice.body
+  // App-generated task briefs contain directions. Free-form drafts stay verbatim and editable.
+  const templateText = voice.source === 'template' && voiceBody.match(
+    /\n逐句文案：([\s\S]*?)\n读音：标出人名、术语、数字及多音字的读法。\n停顿与情绪：/,
+  )
+  const dialogue = templateText ? (templateText[1] === '待补' ? '' : templateText[1]) : voiceBody
+  return { before: shot.dialogue, voiceBody, dialogue }
+}
+
 export function shotPromptContext(project: Project) {
   return `作品共享设定\n画布尺寸、画面比例及语言以本节为准。\n${JSON.stringify(promptSettings(project), null, 2)}`
 }

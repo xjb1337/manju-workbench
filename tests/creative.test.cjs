@@ -557,3 +557,63 @@ test('缓存识别同大小同时间戳的素材替换，并自动淘汰同大�
   assert.equal((await lstat(fragment)).mtimeMs, recovered.mtimeMs)
   assert.deepEqual((await readdir(cacheDir)).sort(), [firstKey, newKey].sort())
 })
+
+test('配音稿差异按镜头标识应用，已变更的稿件或台词拒绝覆盖', async context => {
+  const { voiceDialoguePreview } = require('../dist/shared/prompts')
+  const { store, episodeId, shotId } = await setup(context)
+  const shot = () => store.snapshot.episodes[0].shots[0]
+  const voice = body => store.edit({ type: 'shot.detail', episodeId, shotId, kind: 'voice', action: { type: 'save', body } })
+  const update = dialogue => store.edit({ type: 'shot.edit', episodeId, shotId, fields: { ...shot(), dialogue } })
+  const apply = (preview, dialogue = preview.dialogue) => store.edit({
+    type: 'shot.apply-voice', episodeId, shotId, ...preview, dialogue,
+  })
+  assert.equal(voiceDialoguePreview(shot()), null)
+  await store.edit({ type: 'shot.detail', episodeId, shotId, kind: 'voice', action: { type: 'regenerate' } })
+  assert.equal(voiceDialoguePreview(shot()).dialogue, shot().dialogue)
+  await store.edit({ type: 'shot.add', episodeId, title: shot().title })
+  await voice('第一行\n第二行\n【轻声】')
+  const preview = voiceDialoguePreview(shot())
+  assert.deepEqual(preview, { before: '示例 / 虚构', voiceBody: '第一行\n第二行\n【轻声】', dialogue: '第一行\n第二行\n【轻声】' })
+  await update('其他编辑')
+  await assert.rejects(apply(preview), /重新预览差异/)
+  const newer = voiceDialoguePreview(shot())
+  await voice('第一行\n第二行\n【慢速】')
+  await assert.rejects(apply(newer), /重新预览差异/)
+  await apply(voiceDialoguePreview(shot()), '第一行\n第二行')
+  assert.equal(shot().dialogue, '第一行\n第二行')
+  assert.equal(shot().details.voice.body, '第一行\n第二行\n【慢速】')
+  assert.equal(store.snapshot.episodes[0].shots[1].dialogue, '')
+})
+
+test('横竖屏 SRT 和烧录 ASS 使用相同的帧分段及多行字幕，保留安全标点', () => {
+  const { episodeSrt, subtitleCues } = require('../dist/main/render')
+  const silent = { frames: 7, dialogue: '' }
+  const shot = { frames: 37, dialogue: '观测 <i>& {标记}\\N\r\n\r\n第二行\r第三行\n第四行\n第五行\n' + '长台词'.repeat(12) }
+  const tail = { frames: 2, dialogue: '结束' }
+  const toFrame = ms => Math.ceil(ms * 30 / 1000)
+  const parse = stamp => {
+    const [h, m, s, fraction] = stamp.split(/[:,.]/)
+    return (+h * 3600 + +m * 60 + +s) * 1000 + +fraction * (fraction.length === 2 ? 10 : 1)
+  }
+  for (const ratio of ['16:9', '9:16']) {
+    const spec = frameSpec({ brief: { ratio } })
+    const cues = subtitleCues(shot, spec)
+    assert.ok(cues.length > 1)
+    const ass = subtitles(shot, spec).split('\n').filter(line => line.startsWith('Dialogue: '))
+    assert.deepEqual(ass.map(line => {
+      const [, start, end] = line.split(',')
+      return [toFrame(parse(start)), toFrame(parse(end)), line.split(',,0,0,0,,')[1].split('\\N')]
+    }), cues.map(({ start, end, lines }) => [start, end, lines]))
+    const srt = episodeSrt({ shots: [silent, shot, tail] }, spec)
+    assert.match(srt, /观测 &lt;i&gt;&amp; ｛标记｝＼N\n\u00a0\n第二行/)
+    const srtCues = srt.trimEnd().split('\n\n').map(block => {
+      const [index, time, ...lines] = block.split('\n')
+      return [+index, ...time.split(' --> ').map(stamp => toFrame(parse(stamp))), lines.map(line =>
+        line.replace(/^\u00a0$/, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'))]
+    })
+    assert.deepEqual(srtCues, [
+      ...cues.map(({ start, end, lines }, i) => [i + 1, start + 7, end + 7, lines]),
+      [cues.length + 1, 44, 46, ['结束']],
+    ])
+  }
+})

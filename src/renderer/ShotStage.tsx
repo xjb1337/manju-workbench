@@ -29,6 +29,7 @@ export function ShotStage({
   onPreview,
   onRebuildPreview,
   onExport,
+  onExportSrt,
   onAddPrimary,
   onMagpie,
   onImportPlan,
@@ -53,6 +54,7 @@ export function ShotStage({
   onPreview: () => void
   onRebuildPreview: () => void
   onExport: () => void
+  onExportSrt: () => void
   onAddPrimary: () => void
   onMagpie: () => void
   onImportPlan: () => void
@@ -94,10 +96,11 @@ export function ShotStage({
         <button className="icon small subtle" title="集数剧本" aria-label="集数剧本" disabled={busy}
           onClick={onOpenEpisodeScript}><FileText size={17} /></button>
       </>}</div>
-      <div className="actions">
+      <div className="actions stage-render-actions">
         <span className="export-size">{spec.width} × {spec.height}</span>
         <button disabled={!canRender} onClick={onPreview}><Play size={16} weight="fill" /> 顺序预览</button>
         {shot && <button className="subtle" disabled={!canRender} onClick={onRebuildPreview}>重新生成预览</button>}
+        {shot && <button disabled={!canRender || !episode?.shots.some(item => item.dialogue.trim())} onClick={onExportSrt}>导出 SRT</button>}
         <button className="primary" disabled={!canRender} onClick={onExport}><DownloadSimple size={18} /> 导出 MP4</button>
       </div>
     </div>

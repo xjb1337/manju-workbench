@@ -343,6 +343,13 @@ export function App() {
     setAsk({ kind: 'remove', title, name, change })
   }
 
+  function exportSrt() {
+    if (!opened || !episode) return
+    void run(() => api.exportSrt(opened.mediaKey, episode.id), location => {
+      if (location) setMessage({ text: `字幕已导出 · ${location}` })
+    })
+  }
+
   async function render(mode: RenderProgress['mode'], rebuild = false) {
     if (!opened || !episode || running.current) return
     setProgress({ mode, percent: 0 })
@@ -504,7 +511,7 @@ export function App() {
         {tab === 'shots' ? <ShotStage opened={opened} episode={episode} shot={shot} shotIndex={shotIndex} spec={spec}
           method={method} busy={busy} canRender={canRender} playerOpen={Boolean(player)}
           onOpenEpisodeScript={() => navigate(() => { setScriptScope('episode'); setTab('script'); setDirty(false); setEditorRevision(value => value + 1) })}
-          onPreview={() => void render('preview')} onRebuildPreview={() => void render('preview', true)} onExport={requestExport}
+          onPreview={() => void render('preview')} onRebuildPreview={() => void render('preview', true)} onExport={requestExport} onExportSrt={exportSrt}
           onAddPrimary={() => episode ? addShot() : addEpisode()}
           onMagpie={() => openMagpieDialog()}
           onImportPlan={() => setCreativeDialog('import')}
@@ -592,6 +599,14 @@ export function App() {
         }).catch(() => failure('桌面进程连接中断'))}
         onDirty={setDirty} copy={(text, failure) => run(() => api.copy(text), undefined, failure)}
         save={(action, failure) => edit({ type: 'shot.detail', episodeId: episode.id, shotId: shot.id, kind: creativeDialog, action }, undefined, failure)}
+        onApplyVoice={creativeDialog === 'voice' ? (change, failure) => {
+          if (dirty) {
+            failure('请先保存台词或配音稿')
+            return Promise.resolve(false)
+          }
+          return edit({ type: 'shot.apply-voice', episodeId: episode.id, shotId: shot.id, ...change },
+            () => setMessage({ text: '已应用到本镜台词' }), failure)
+        } : undefined}
         close={() => setCreativeDialog(null)} />}
     {opened && project && scriptAi && <ScriptAiDialog
       scope={scriptAi.scope} episodeTitle={episode?.title} fictional={project.fictional}

@@ -57,6 +57,7 @@ export interface Workbench {
   copy(text: string): Promise<Reply<null>>
   openTool(key: string, tool: Tool): Promise<Reply<null>>
   render(key: string, episodeId: string, mode: RenderProgress['mode'], rebuild?: boolean): Promise<Reply<RenderResult>>
+  exportSrt(key: string, episodeId: string): Promise<Reply<string | null>>
   cancelRender(): Promise<Reply<boolean>>
   onProgress(listener: (event: RenderProgress) => void): () => void
   checkUpdate(): Promise<Reply<UpdateCheck>>

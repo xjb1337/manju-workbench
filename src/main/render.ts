@@ -13,13 +13,17 @@ const fps = 30
 const sampleRate = 48_000
 const cjkUnit = 100
 const asciiUnit = 55
-const shotCacheVersion = 'shot-cache-v2'
+const shotCacheVersion = 'shot-cache-v3'
 
-export function subtitleText(value: string) {
-  // ASS override delimiters and backslash escapes are reserved markup.
+function captionLines(value: string) {
+  // Keep literal punctuation outside ASS override and escape syntax.
   const punctuation: Record<string, string> = { '\\': '＼', '{': '｛', '}': '｝' }
   return value.trim().replace(/[\\{}]/g, char => punctuation[char])
-    .replace(/[\x00-\x09\x0b\x0c\x0e-\x1f]/g, '').replace(/\r\n|\r|\n/g, '\\N')
+    .replace(/[\x00-\x09\x0b\x0c\x0e-\x1f]/g, '').split(/\r\n|\r|\n/)
+}
+
+export function subtitleText(value: string) {
+  return captionLines(value).join('\\N')
 }
 
 function assTime(frames: number) {
@@ -117,19 +121,48 @@ function wrapLine(line: string, maxUnits: number) {
   return wrapped
 }
 
-export function subtitles(shot: Shot, { width, height, subtitle }: FrameSpec) {
+export function subtitleCues(shot: Pick<Shot, 'frames' | 'dialogue'>, { width, subtitle }: FrameSpec) {
+  const input = captionLines(shot.dialogue)
+  if (!input.some(line => line.trim())) return []
   const maxColumns = Math.floor((width - subtitle.horizontal * 2) / (subtitle.size * 1.15))
   const maxUnits = Math.max(cjkUnit, maxColumns * cjkUnit)
-  const lines = subtitleText(shot.dialogue).split('\\N').flatMap(line => wrapLine(line, maxUnits))
+  const lines = input.flatMap(line => wrapLine(line, maxUnits))
   const linesPerPage = 4
   const pages = Math.ceil(lines.length / linesPerPage)
   if (pages > shot.frames) throw new Error('镜头时长不足以显示全部字幕，请缩短台词或延长镜头')
-  const events = Array.from({ length: pages }, (_, index) => {
-    const start = Math.floor(index * shot.frames / pages)
-    const end = Math.floor((index + 1) * shot.frames / pages)
-    const text = lines.slice(index * linesPerPage, (index + 1) * linesPerPage).join('\\N')
-    return `Dialogue: 0,${assTime(start)},${assTime(end)},Chinese,,0,0,0,,${text}`
-  }).join('\n')
+  return Array.from({ length: pages }, (_, index) => ({
+    start: Math.floor(index * shot.frames / pages),
+    end: Math.floor((index + 1) * shot.frames / pages),
+    lines: lines.slice(index * linesPerPage, (index + 1) * linesPerPage),
+  }))
+}
+
+function srtTime(frames: number) {
+  const ms = Math.floor(frames * 1000 / fps)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${pad(Math.floor(ms / 3_600_000))}:${pad(Math.floor(ms / 60_000) % 60)}:${pad(Math.floor(ms / 1000) % 60)},${String(ms % 1000).padStart(3, '0')}`
+}
+
+export function episodeSrt(episode: Pick<Episode, 'shots'>, spec: FrameSpec) {
+  const escape = (line: string) => line.trim()
+    ? line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    : '\u00a0'
+  let offset = 0
+  let index = 0
+  const blocks: string[] = []
+  for (const shot of episode.shots) {
+    for (const { start, end, lines } of subtitleCues(shot, spec)) {
+      blocks.push(`${++index}\n${srtTime(offset + start)} --> ${srtTime(offset + end)}\n${lines.map(escape).join('\n')}\n`)
+    }
+    offset += shot.frames
+  }
+  return blocks.join('\n')
+}
+
+export function subtitles(shot: Shot, spec: FrameSpec) {
+  const { width, height, subtitle } = spec
+  const events = subtitleCues(shot, spec).map(({ start, end, lines }) =>
+    `Dialogue: 0,${assTime(start)},${assTime(end)},Chinese,,0,0,0,,${lines.join('\\N')}`).join('\n')
   const font = process.platform === 'win32' ? 'Microsoft YaHei' : 'Noto Sans CJK SC'
   return `[Script Info]
 ScriptType: v4.00+
@@ -295,7 +328,7 @@ async function encodeShot(
   const audioArgs = embeddedAudio ? [] : voice && voicePath ? mediaInput(voicePath, voice.extension)
     : ['-f', 'lavfi', '-i', `anullsrc=r=${sampleRate}:cl=mono`]
   const captionFile = `caption-${index}.ass`
-  const caption = subtitleText(shot.dialogue)
+  const caption = !!shot.dialogue.trim()
   if (caption) await writeFile(path.join(cwd, captionFile), subtitles(shot, spec), 'utf8')
   const videoFilter = [
     'setpts=PTS-STARTPTS',
@@ -330,8 +363,8 @@ async function encodeShot(
   })
 }
 
-export async function exportDestination(requested: string, projectRoot: string) {
-  if (path.extname(requested).toLowerCase() !== '.mp4') throw new Error('导出文件名必须以 .mp4 结尾')
+export async function exportDestination(requested: string, projectRoot: string, extension: '.mp4' | '.srt' = '.mp4') {
+  if (path.extname(requested).toLowerCase() !== extension) throw new Error(`导出文件名必须以 ${extension} 结尾`)
   const basename = path.basename(requested)
   const name = folderNameSchema.parse(basename)
   if (name !== basename) throw new Error('导出文件名首尾不能包含空白字符')
@@ -346,6 +379,19 @@ export async function exportDestination(requested: string, projectRoot: string) 
   })
   if (existing && !existing.isFile()) throw new Error('导出目标必须是普通文件')
   return target
+}
+
+export async function writeEpisodeSrt(destination: string, episode: Episode, spec: FrameSpec) {
+  const srt = episodeSrt(episode, spec)
+  if (!srt) throw new Error('本集没有可导出的字幕')
+  const staging = await mkdtemp(path.join(path.dirname(destination), '.manju-render-'))
+  try {
+    const file = path.join(staging, 'captions.srt')
+    await writeFile(file, srt, { encoding: 'utf8', flush: true })
+    await renameWithRetry(file, destination)
+  } finally {
+    await rm(staging, { recursive: true, force: true }).catch(() => {})
+  }
 }
 
 export async function renderEpisode(

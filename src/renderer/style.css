@@ -132,6 +132,7 @@ h3 { font-size: 14px; }
 .stage-title h2 { min-width: 0; overflow-wrap: anywhere; }
 .stage-count { font-variant-numeric: tabular-nums; }
 .stage .actions { flex-shrink: 0; }
+.stage .stage-render-actions { flex-shrink: 1; flex-wrap: wrap; justify-content: flex-end; }
 .monitor { color-scheme: dark; border: 1px solid #252736; border-radius: 10px; overflow: hidden; background: #101118; color: #ededf3; box-shadow: var(--shadow); }
 .monitor-top, .monitor-bottom { min-height: 37px; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 0 13px; font-size: 12px; color: #b8bcd0; }
 .monitor-top > div, .monitor-bottom > span { display: flex; align-items: center; gap: 9px; min-width: 0; }
@@ -326,6 +327,9 @@ dialog:has(.creative-dialog) { width: min(855px, calc(100vw - 42px)); max-height
 .diff-row[data-conflict="true"] { border-left: 3px solid var(--warn); padding-left: 10px; }
 .diff-values { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 7px; }
 .diff-values > div { background: var(--well); border-radius: 6px; padding: 6px 8px; }
+.caption-episode, .caption-saved { color: var(--muted); margin: 0; }
+.caption-diff .field { margin: 0; }
+.caption-saved p { white-space: pre-wrap; overflow-wrap: anywhere; margin: 2px 0 0; }
 .diff-values strong { font-size: 11px; color: var(--muted); }
 .diff-values pre, .prompt-settings pre { font-family: inherit; font-size: 13px; max-height: 10em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 3px 0 0; }
 .diff-choice { display: flex; align-items: center; gap: 7px; margin-top: 8px; font-size: 12px; }

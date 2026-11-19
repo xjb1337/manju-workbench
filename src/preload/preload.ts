@@ -47,6 +47,7 @@ const bridge: Workbench = {
   copy: text => ipcRenderer.invoke('app:copy', text),
   openTool: (key, tool) => ipcRenderer.invoke('app:open-tool', key, tool),
   render: (key, episodeId, mode, rebuild) => ipcRenderer.invoke('episode:render', key, episodeId, mode, rebuild),
+  exportSrt: (key, episodeId) => ipcRenderer.invoke('episode:export-srt', key, episodeId),
   cancelRender: () => ipcRenderer.invoke('episode:cancel'),
   onProgress: listener => {
     const handler = (_event: Electron.IpcRendererEvent, value: RenderProgress) => listener(value)

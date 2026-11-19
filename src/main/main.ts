@@ -6,13 +6,13 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { z } from 'zod'
 import type { RenderProgress, RenderResult, Reply } from '../shared/api'
-import { extensions, folderNameSchema, idSchema, mediaTargetSchema } from '../shared/model'
+import { extensions, folderNameSchema, idSchema, mediaTargetSchema, mutationSchema } from '../shared/model'
 import { detailKindSchema, detailTextSchema, frameSpec, generationKindSchema, generationPresets, generationToolUrl } from '../shared/creative'
 import { aiGatewayConfigSchema, aiInstructionSchema, magpieModelSchema, magpieScriptSchema } from '../shared/plan'
 import { magpiePlanningPrompt, scriptAiPrompt, shotDetailAiPrompt } from '../shared/prompts'
 import { generateAiTextDraft, generateMagpiePlan, testAiGateway } from './magpie'
 import { mediaResponse } from './media-protocol'
-import { exportDestination, renderEpisode } from './render'
+import { exportDestination, renderEpisode, writeEpisodeSrt } from './render'
 import { fillSample, fillVerticalSample } from './sample'
 import { RecentProjects, themeSchema, type WindowBounds } from './recent-projects'
 import { WorkbenchSession } from './session'
@@ -61,6 +61,10 @@ async function writableProject(win: BrowserWindow, key: unknown) {
   if (!win.isDestroyed()) win.webContents.send('project:upgraded', { project, mediaKey, directory: copy.root })
   await recent.remember({ directory: copy.root, title: project.title, fictional: project.fictional })
   return copy
+}
+
+function exportLabel(title: string) {
+  return title.replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ').replace(/[. ]+$/, '').slice(0, 80)
 }
 
 function diagnose(error: unknown) {
@@ -172,9 +176,11 @@ function wire() {
     return null
   })
   handle('project:edit', (win, key, change) => workbench.serial(async () => {
+    const mutation = mutationSchema.parse(change)
+    if (mutation.type === 'shot.apply-voice' && workbench.editorDirty) throw new Error('请先保存台词或配音稿')
     const store = await writableProject(win, key)
-    const project = await store.edit(change)
-    if (change && typeof change === 'object' && (change as { type?: unknown }).type === 'project.edit') {
+    const project = await store.edit(mutation)
+    if (mutation.type === 'project.edit') {
       await recent.remember({ directory: store.root, title: project.title, fictional: project.fictional })
     }
     return project
@@ -278,6 +284,20 @@ function wire() {
     await shell.openExternal(new URL(generationToolUrl.parse(url)).href)
     return null
   })
+  handle('episode:export-srt', (win, key, id) => workbench.serial(async () => {
+    const store = workbench.getStore(key)
+    const project = store.snapshot
+    const episode = findEpisode(project, idSchema.parse(id))
+    const label = exportLabel(episode.title)
+    const selected = await dialog.showSaveDialog(win, {
+      title: '导出 SRT', defaultPath: path.join(store.root, `字幕 - ${label}.srt`),
+      filters: [{ name: 'SRT', extensions: ['srt'] }],
+    })
+    if (selected.canceled || !selected.filePath) return null
+    const target = await exportDestination(selected.filePath, store.root, '.srt')
+    await writeEpisodeSrt(target, episode, frameSpec(project))
+    return target
+  }))
   handle('episode:cancel', () => workbench.cancelRender())
   handle('episode:render', (win, key, id, value, rebuildInput) => workbench.serial(async (): Promise<RenderResult> => {
     const mode = z.enum(['preview', 'export']).parse(value)
@@ -295,7 +315,7 @@ function wire() {
         previewDir = await mkdtemp(path.join(tmpdir(), 'manju-preview-'))
         target = path.join(previewDir, 'preview.mp4')
       } else {
-        const label = episode.title.replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ').replace(/[. ]+$/, '').slice(0, 80)
+        const label = exportLabel(episode.title)
         const selected = await dialog.showSaveDialog(win, { title: '导出 MP4', defaultPath: path.join(store.root, `成片 - ${label}.mp4`),
           filters: [{ name: 'MP4', extensions: ['mp4'] }] })
         if (selected.canceled || !selected.filePath) return { status: 'canceled' } as const

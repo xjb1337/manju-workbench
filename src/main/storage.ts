@@ -165,6 +165,14 @@ function mutate(project: Project, change: Mutation) {
       }
       break
     }
+    case 'shot.apply-voice': {
+      const shot = findShot(project, change.episodeId, change.shotId)
+      if (shot.dialogue !== change.before || shot.details?.voice?.body !== change.voiceBody) {
+        throw new Error('台词或配音稿已变更，请重新预览差异')
+      }
+      shot.dialogue = change.dialogue
+      break
+    }
     case 'media.keep': {
       const version = trackFor(project, change.target).versions.find(item => item.id === change.versionId)
       if (!version) throw new Error('素材版本不存在')
