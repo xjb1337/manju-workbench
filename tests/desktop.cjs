@@ -7,6 +7,7 @@ const path = require('node:path')
 const { _electron: electron } = require('playwright')
 const { notes: updateNotes, releaseFixture, startUpdateFixture } = require('./update-fixture.cjs')
 
+const version = require('../package.json').version
 const repository = path.resolve(__dirname, '..')
 const run = path.resolve(process.env.MANJU_RUN_DIR ?? path.join(tmpdir(), 'manju-workbench'))
 const screenshots = path.join(run, 'screenshots')
@@ -135,7 +136,7 @@ async function verifyUpdates(folder, project) {
     await screenshot(page, 'update-01-entry.png')
     await button(page, '检查更新').click()
     await panel.getByText('暂无发布', { exact: true }).waitFor()
-    await panel.getByText('1.0.0', { exact: true }).waitFor()
+    await panel.getByText(version, { exact: true }).waitFor()
     assert.equal(await button(panel, '下载').count(), 0)
     await screenshot(page, 'update-02-no-release.png')
     await button(panel, '关闭').click()

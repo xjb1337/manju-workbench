@@ -40,7 +40,7 @@ test('只在请求检查时联网，无正式 Release 时显示暂无发布且�
 })
 
 test('当前版本与正式发布相同或更高时显示已是最新版本', async t => {
-  for (const released of ['1.0.0', '0.99.99']) {
+  for (const released of [version, '0.99.99']) {
     const { updater } = await service(t, { fixture: releaseFixture({ version: released }) })
     assert.deepEqual(await updater.check(), { currentVersion: version, status: 'latest', version: released, notes })
     assert.throws(() => updater.download(() => {}), /没有可下载/)
