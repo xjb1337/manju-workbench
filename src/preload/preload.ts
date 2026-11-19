@@ -1,11 +1,22 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { RenderProgress, UpdateProgress, Workbench } from '../shared/api'
+import type { OpenProject, RenderProgress, UpdateProgress, Workbench } from '../shared/api'
 
 const bridge: Workbench = {
   open: () => ipcRenderer.invoke('project:open'),
   recentProjects: () => ipcRenderer.invoke('project:recent'),
   openRecent: id => ipcRenderer.invoke('project:open-recent', id),
   create: (title, sample) => ipcRenderer.invoke('project:create', title, sample),
+  onUpgradeRequired: listener => {
+    const handler = (_event: Electron.IpcRendererEvent, id: string) => listener(id)
+    ipcRenderer.on('project:upgrade-required', handler)
+    return () => ipcRenderer.removeListener('project:upgrade-required', handler)
+  },
+  answerUpgrade: (id, approved) => ipcRenderer.invoke('project:answer-upgrade', id, approved),
+  onUpgraded: listener => {
+    const handler = (_event: Electron.IpcRendererEvent, opened: OpenProject) => listener(opened)
+    ipcRenderer.on('project:upgraded', handler)
+    return () => ipcRenderer.removeListener('project:upgraded', handler)
+  },
   close: () => ipcRenderer.invoke('project:close'),
   edit: (key, change) => ipcRenderer.invoke('project:edit', key, change),
   previewPlan: (key, episodeId, text) => ipcRenderer.invoke('plan:preview', key, episodeId, text),

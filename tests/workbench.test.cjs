@@ -391,3 +391,40 @@ test('RecentProjects 支持 aiGateway 预设、地址与模型持久化', async 
     model: 'qwen2.5:14b',
   })
 })
+
+test('格式 1 拒绝隐式写入，取消保持字节，确认复制全部素材版本及待合并规划', async context => {
+  const { legacyFixture } = require('./legacy-fixture.cjs')
+  const parent = await workspace(context)
+  const fixture = await legacyFixture(parent)
+  const { root, file, bytes, names, mediaBytes, snapshot, target } = fixture
+  const opened = await ProjectStore.open(root)
+  const episode = snapshot.episodes[0]
+  const brief = { type: 'project.brief', workType: 'story', brief: { theme: '虚构观测' } }
+  const staged = await opened.previewPlan(episode.id, JSON.stringify({
+    schemaVersion: 1, missing: [], episode: { shots: [{ shotId: target.shotId, title: '虚构夜港' }] },
+  }))
+
+  assert.equal(await opened.upgradeCopy(async () => false), null)
+  await assert.rejects(opened.edit(brief), /先保留原件/)
+  await assert.rejects(opened.importMedia(target, 'resources/sample/03.jpg'), /先保留原件/)
+  await assert.rejects(opened.cleanOrphanMedia(), /先保留原件/)
+  await assert.rejects(opened.recordExport(episode), /先保留原件/)
+  await assert.rejects(opened.mergePlan(staged.token, []), /先保留原件/)
+  assert.deepEqual(await readdir(parent), [path.basename(root)])
+  assert.deepEqual(await readFile(file), bytes)
+  assert.deepEqual(await Promise.all(names.map(name => readFile(path.join(root, 'media', name)))), mediaBytes)
+
+  const copy = await opened.upgradeCopy(async () => true)
+  const reopened = await ProjectStore.open(copy.root)
+  assert.deepEqual(reopened.snapshot, { ...snapshot, schemaVersion: 2 })
+  const track = reopened.snapshot.episodes[0].shots[0].media.image
+  assert.equal(track.activeId, track.versions[1].id)
+  assert.deepEqual(await Promise.all(names.map(name => readFile(path.join(copy.root, 'media', name)))), mediaBytes)
+  assert.ok((await readdir(parent)).every(name => !name.startsWith('.manju-upgrade-')))
+  await copy.mergePlan(staged.token, staged.changes.filter(change => change.conflict).map(change => change.id))
+  assert.equal(copy.snapshot.episodes[0].shots[0].title, '虚构夜港')
+  await copy.edit(brief)
+  assert.equal(copy.snapshot.brief.theme, '虚构观测')
+  assert.deepEqual(await readFile(file), bytes)
+  assert.deepEqual(await Promise.all(names.map(name => readFile(path.join(root, 'media', name)))), mediaBytes)
+})

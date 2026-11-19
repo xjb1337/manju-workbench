@@ -9,7 +9,7 @@ export interface OpenProject {
   directory: string
 }
 
-export type Reply<T> = { ok: true; value: T } | { ok: false; error: string; code?: 'update-package-invalid' }
+export type Reply<T> = { ok: true; value: T } | { ok: false; error: string; code?: 'update-package-invalid' | 'upgrade-canceled' }
 export type RecentProject = { id: string; title: string; directory: string; fictional: boolean }
 export type Tool = GenerationKind | 'planning'
 export type RenderProgress = { mode: 'preview' | 'export'; percent: number }
@@ -32,6 +32,9 @@ export interface Workbench {
   recentProjects(): Promise<Reply<RecentProject[]>>
   openRecent(id: string): Promise<Reply<OpenProject | null>>
   create(title: string, sample: boolean | 'vertical'): Promise<Reply<OpenProject | null>>
+  onUpgradeRequired(listener: (id: string) => void): () => void
+  answerUpgrade(id: string, approved: boolean): Promise<Reply<null>>
+  onUpgraded(listener: (opened: OpenProject) => void): () => void
   close(): Promise<Reply<null>>
   edit(key: string, change: Mutation): Promise<Reply<Project>>
   previewPlan(key: string, episodeId: string | null, text: string): Promise<Reply<PlanPreview>>

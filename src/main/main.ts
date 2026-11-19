@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, protocol, screen, session, shell } from 'electron'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -33,6 +34,34 @@ let updater: Updater
 let recent: RecentProjects
 let boundsSave: Promise<void> = Promise.resolve()
 const workbench = new WorkbenchSession({ rememberProject: entry => recent.remember(entry) })
+class UpgradeCanceled extends Error {}
+let upgradeChoice: { id: string; resolve: (approved: boolean) => void } | undefined
+
+async function writableProject(win: BrowserWindow, key: unknown) {
+  const store = workbench.getStore(key)
+  if (!store.needsUpgrade) return store
+  const copy = await store.upgradeCopy(async () => {
+    if (win.isDestroyed()) return false
+    const id = randomUUID()
+    const closed = () => upgradeChoice?.resolve(false)
+    const approved = await new Promise<boolean>(resolve => {
+      upgradeChoice = { id, resolve }
+      win.once('closed', closed)
+      win.webContents.send('project:upgrade-required', id)
+    }).finally(() => {
+      win.removeListener('closed', closed)
+      upgradeChoice = undefined
+    })
+    return approved && !win.isDestroyed()
+  })
+  if (!copy) throw new UpgradeCanceled()
+  const mediaKey = key as string
+  workbench.current = { store: copy, key: mediaKey }
+  const project = copy.snapshot
+  if (!win.isDestroyed()) win.webContents.send('project:upgraded', { project, mediaKey, directory: copy.root })
+  await recent.remember({ directory: copy.root, title: project.title, fictional: project.fictional })
+  return copy
+}
 
 function diagnose(error: unknown) {
   if (error instanceof z.ZodError) {
@@ -58,6 +87,7 @@ function handle<T>(channel: string, fn: (win: BrowserWindow, ...args: unknown[])
     try {
       return { ok: true, value: await fn(win, ...args) }
     } catch (error) {
+      if (error instanceof UpgradeCanceled) return { ok: false, error: '已取消升级', code: 'upgrade-canceled' }
       console.error(channel, error)
       if (error instanceof InvalidUpdatePackageError) return { ok: false, error: error.message, code: 'update-package-invalid' }
       return { ok: false, error: diagnose(error) }
@@ -135,8 +165,14 @@ function wire() {
     return workbench.switchProject(await ProjectStore.open(entry.directory))
   }))
   handle('project:close', () => workbench.serial(async () => { await workbench.switchProject(null); return null }))
-  handle('project:edit', (_win, key, change) => workbench.serial(async () => {
-    const store = workbench.getStore(key)
+  handle('project:answer-upgrade', (_win, input, choice) => {
+    const id = idSchema.parse(input)
+    const approved = z.boolean().parse(choice)
+    if (upgradeChoice?.id === id) upgradeChoice.resolve(approved)
+    return null
+  })
+  handle('project:edit', (win, key, change) => workbench.serial(async () => {
+    const store = await writableProject(win, key)
     const project = await store.edit(change)
     if (change && typeof change === 'object' && (change as { type?: unknown }).type === 'project.edit') {
       await recent.remember({ directory: store.root, title: project.title, fictional: project.fictional })
@@ -208,7 +244,7 @@ function wire() {
     workbench.cancelPlanGeneration(key)
     return null
   })
-  handle('plan:merge', (_win, key, token, replacements) => workbench.serial(() => workbench.getStore(key).mergePlan(token, replacements)))
+  handle('plan:merge', (win, key, token, replacements) => workbench.serial(async () => (await writableProject(win, key)).mergePlan(token, replacements)))
   handle('project:import', (win, key, input) => workbench.serial(async () => {
     const store = workbench.getStore(key)
     const target = mediaTargetSchema.parse(input)
@@ -217,20 +253,19 @@ function wire() {
     const selected = await dialog.showOpenDialog(win, { title: `导入${label}`, properties: ['openFile'],
       defaultPath: await recent.defaultDirectory('media', store.root), filters: [{ name: label, extensions: extensions[kind] }] })
     if (selected.canceled || !selected.filePaths[0]) return null
-    const project = await store.importMedia(target, selected.filePaths[0])
+    const project = await (await writableProject(win, key)).importMedia(target, selected.filePaths[0])
     await recent.rememberMedia(selected.filePaths[0])
     return project
   }))
-  handle('project:import-dropped', (_win, key, input, sourceInput) => workbench.serial(async () => {
-    const store = workbench.getStore(key)
+  handle('project:import-dropped', (win, key, input, sourceInput) => workbench.serial(async () => {
     const target = mediaTargetSchema.parse(input)
     const source = z.string().min(1).refine(path.isAbsolute, '拖入的文件路径无效').parse(sourceInput)
-    const project = await store.importMedia(target, source)
+    const project = await (await writableProject(win, key)).importMedia(target, source)
     await recent.rememberMedia(source)
     return project
   }))
   handle('media:inspect-orphans', (_win, key) => workbench.serial(() => workbench.getStore(key).inspectOrphanMedia()))
-  handle('media:clean-orphans', (_win, key) => workbench.serial(() => workbench.getStore(key).cleanOrphanMedia()))
+  handle('media:clean-orphans', (win, key) => workbench.serial(async () => (await writableProject(win, key)).cleanOrphanMedia()))
   handle('app:copy', (_win, text) => {
     clipboard.writeText(z.string().max(64 * 1024 * 1024).parse(text))
     return null
@@ -245,10 +280,10 @@ function wire() {
   })
   handle('episode:cancel', () => workbench.cancelRender())
   handle('episode:render', (win, key, id, value) => workbench.serial(async (): Promise<RenderResult> => {
-    const store = workbench.getStore(key)
+    const mode = z.enum(['preview', 'export']).parse(value)
+    const store = mode === 'export' ? await writableProject(win, key) : workbench.getStore(key)
     const projectSnapshot = store.snapshot
     const episode = findEpisode(projectSnapshot, idSchema.parse(id))
-    const mode = z.enum(['preview', 'export']).parse(value)
     const state = { controller: new AbortController(), publishing: false }
     workbench.job = state
     const signal = state.controller.signal

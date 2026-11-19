@@ -741,6 +741,45 @@ async function verifyCreative(folder, parent, profile) {
   }
 }
 
+async function verifyLegacyUpgrade(folder) {
+  const { legacyFixture } = require('./legacy-fixture.cjs')
+  const parent = path.join(folder, '格式升级夹具')
+  await mkdir(parent)
+  const fixture = await legacyFixture(parent)
+  const { app, page } = await launch(path.join(folder, '格式升级 Electron Profile'))
+  try {
+    await choose(app, fixture.root)
+    await button(page, '打开作品').click()
+    await page.locator('footer').getByText('格式 1', { exact: true }).waitFor()
+    await button(directory(page), '制作简报').click()
+    await page.getByLabel('主题').fill('虚构升级验收')
+    await button(page, '总规划提示词').click()
+    const dialog = page.getByRole('dialog', { name: '升级格式 1 作品' })
+    await dialog.getByText(/旧版无法打开升级后的格式 2/).waitFor()
+    await screenshot(page, 'feature-format-1-upgrade-confirmation.png')
+    await button(dialog, '取消').click()
+    await dialog.waitFor({ state: 'hidden' })
+    await page.locator('footer').getByText('有未保存修改', { exact: true }).waitFor()
+    assert.equal(await page.getByRole('dialog').count(), 0)
+    assert.deepEqual(await readdir(parent), [path.basename(fixture.root)])
+    assert.deepEqual(await readFile(fixture.file), fixture.bytes)
+    await button(page, '总规划提示词').click()
+    await button(dialog, '保留原件并升级副本').click()
+    await page.getByRole('dialog', { name: '总规划提示词' }).waitFor()
+    const [copy] = (await readdir(parent)).filter(name => name !== path.basename(fixture.root))
+    const upgraded = await documentAt(path.join(parent, copy, 'project.json'))
+    assert.equal(upgraded.schemaVersion, 2)
+    assert.equal(upgraded.brief.theme, '虚构升级验收')
+    assert.deepEqual(await readFile(fixture.file), fixture.bytes)
+    for (const [index, name] of fixture.names.entries()) {
+      assert.deepEqual(await readFile(path.join(fixture.root, 'media', name)), fixture.mediaBytes[index])
+      assert.deepEqual(await readFile(path.join(parent, copy, 'media', name)), fixture.mediaBytes[index])
+    }
+  } finally {
+    await app.close()
+  }
+}
+
 async function main() {
   await mkdir(screenshots, { recursive: true })
   const verify = path.join(run, 'verification')
@@ -1113,6 +1152,7 @@ async function main() {
     assert.ok((await readdir(project)).every(name => !name.startsWith('.manju-render-')))
     await app.close()
     const portrait = await verifyCreative(folder, parent, path.join(folder, '竖屏 Electron Profile'))
+    await verifyLegacyUpgrade(folder)
     await verifyUpdates(folder, project)
     assert.deepEqual(await documentAt(projectFile), finalManifest)
     await writeFile(path.join(folder, 'acceptance.json'), JSON.stringify({

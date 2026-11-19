@@ -31,7 +31,7 @@ test('旧版 JSON 打开后保留原字段，预览与导出共享横竖画布�
   assert.equal(raw.schemaVersion, 1)
   for (const key of ['workType', 'brief', 'plan']) assert.ok(!(key in raw))
   for (const key of ['method', 'details']) assert.ok(!(key in raw.episodes[0].shots[0]))
-  const opened = await ProjectStore.open(store.root)
+  let opened = await ProjectStore.open(store.root)
   assert.deepEqual(opened.snapshot, raw)
   let renderedLandscape
   for (const [index, [ratio, width, height]] of [['16:9', 1280, 720], ['9:16', 720, 1280]].entries()) {
@@ -54,8 +54,10 @@ test('旧版 JSON 打开后保留原字段，预览与导出共享横竖画布�
       sizes.push([stream.width, stream.height])
     }
     assert.deepEqual(sizes, [[width, height], [width, height]])
+    if (!index) opened = await opened.upgradeCopy(async () => true)
     await opened.recordExport(episode, ratio, snapshot)
-    assert.equal(JSON.parse(await readFile(file, 'utf8')).schemaVersion, 2)
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).schemaVersion, 1)
+    assert.equal(opened.snapshot.schemaVersion, 2)
     if (!index) renderedLandscape = episode
   }
 })

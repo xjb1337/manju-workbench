@@ -60,6 +60,7 @@ export function App() {
   const [player, setPlayer] = useState('')
   const [message, setMessage] = useState<{ text: string; error?: boolean } | null>(null)
   const [ask, setAsk] = useState<Ask | null>(null)
+  const [upgradeRequest, setUpgradeRequest] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
   const [creativeDialog, setCreativeDialog] = useState<'plan' | 'import' | 'magpie' | DetailKind | null>(null)
   const [magpieSeedScript, setMagpieSeedScript] = useState<string | null>(null)
@@ -95,6 +96,10 @@ export function App() {
   const guideShot = shotForStep(step)
 
   useEffect(() => api.onProgress(setProgress), [])
+  useEffect(() => api.onUpgradeRequired(setUpgradeRequest), [])
+  useEffect(() => api.onUpgraded(next => {
+    setOpened(current => current?.mediaKey === next.mediaKey ? next : current)
+  }), [])
   useEffect(() => {
     let current = true
     void api.getAiConfig?.().then(reply => {
@@ -164,6 +169,7 @@ export function App() {
     try {
       const result = await action()
       if (!result.ok) {
+        if (result.code === 'upgrade-canceled') return false
         if (failure) failure(result.error)
         else setMessage({ text: result.error, error: true })
         return false
@@ -540,7 +546,7 @@ export function App() {
           onRemove={() => remove('删除镜头', shot.title, { type: 'shot.remove', episodeId: episode.id, shotId: shot.id })} />}
       </div>
       <footer><span><FolderOpen size={14} /> <span className="project-path" title={opened.directory}>{opened.directory}</span></span>
-        <span>{busy ? '处理中' : dirty ? '有未保存修改' : '已保存'}</span></footer>
+        <span>{project.schemaVersion === 1 && <Badge value="格式 1" />} {busy ? '处理中' : dirty ? '有未保存修改' : '已保存'}</span></footer>
     </>}
 
     {opened && project && creativeDialog === 'plan' && <PlanningDialog project={project} episode={episode} busy={busy}
@@ -667,6 +673,19 @@ export function App() {
         }
       })}
       close={() => setAiSettingsOpen(false)} />}
+    {upgradeRequest && (() => {
+      const answer = (approved: boolean) => {
+        setUpgradeRequest(null)
+        void api.answerUpgrade(upgradeRequest, approved)
+      }
+      return <Modal title="升级格式 1 作品" onClose={() => answer(false)}>
+        <p className="risk"><WarningCircle aria-hidden="true" size={20} />旧版无法打开升级后的格式 2。升级将在同一上级目录创建带素材的副本，并保留格式 1 原件。</p>
+        <div className="dialog-actions">
+          <button autoFocus onClick={() => answer(false)}>取消</button>
+          <button className="primary" onClick={() => answer(true)}>保留原件并升级副本</button>
+        </div>
+      </Modal>
+    })()}
     {message && !player && ask?.kind !== 'name' && ask?.kind !== 'remove' && ask?.kind !== 'clean-orphans' && <div className={`toast ${message.error ? 'error' : ''}`} role={message.error ? 'alert' : 'status'}>
       {message.error ? <WarningCircle size={19} /> : <Check size={19} />}
       <span>{message.text}</span><button className="icon small subtle" title="关闭提示" aria-label="关闭提示" onClick={() => setMessage(null)}><X size={16} /></button>
