@@ -11,7 +11,18 @@ npm ci
 npm run dev
 ```
 
-生产构建成功后可直接运行 `npm start`。Windows x64 安装包可用 `npm run pack:win` 构建，默认保存到 `release/`。安装包内的应用仍从系统 PATH 查找 FFmpeg。当前安装包尚未在 Windows 真机上验证安装、启动与导出。
+生产构建成功后可直接运行 `npm start`。使用 Windows 安装包或便携包也需另行安装 FFmpeg，并将 `ffmpeg` 和 `ffprobe` 加入系统 PATH。
+
+## 1.1.0 发布说明
+
+- 制作流程引导按作品内容显示各步骤的进度和下一步操作，并按集记录导出结果。
+- 通用作品类型覆盖漫剧／故事、知识讲解、代码视频和混合制作。制作简报保存受众、目标时长、画面比例和风格等设定。
+- 可按镜头编辑和复制生图、Flow 视频详细提示词、代码任务书以及配音字幕稿。
+- 外部规划 JSON 可在导入前预览。字段冲突由用户核对并确认后合并。
+- 可在应用内手动检查正式更新，下载后校验附件。识别出的自定义 NSIS 安装可在用户确认后启动安装，便携版可打开下载目录并手动替换。
+- 时间线可实际导出为 H.264 + AAC MP4，支持 16:9（1280×720）和 9:16（720×1280）。
+
+应用未签名，SHA-256 仅校验文件完整性。Windows 真机安装、启动、覆盖更新和导出尚未验证。安装包需另行安装 FFmpeg。这一版本尚未完成商用品质验收。
 
 ## 作品目录
 
@@ -49,24 +60,35 @@ xvfb-run -a -s '-screen 0 1600x1050x24' npm run verify:desktop
 
 桌面验收在独立 Electron 配置中运行。可用 `MANJU_RUN_DIR` 修改验收输出路径。
 
-### Linux 原生 NSIS 构建
+## Windows x64 打包
 
-标准 NSIS 目标可在具备可用 Windows 环境或 Wine 的主机运行。Linux 上也可用原生 `makensis` 编译本仓库的中文安装脚本。
+`npm run pack:win` 调用 Electron Builder 的标准 NSIS 目标。在当前 Linux 环境中，该目标因缺少可用 Wine 而无法完成。用于应用内覆盖更新的 Setup 由本仓库的自定义 NSIS 脚本生成。Linux 上先构建解包目录，再使用缓存中的 Linux 版 `makensis` 编译该脚本。
 
 ```sh
 npm run build
 npx electron-builder --win --dir --x64
-npm run pack:win:native -- /path/to/makensis release/win-unpacked release/Manju-Workbench-1.0.0-x64-Setup.exe
+npm run pack:win:native -- /path/to/makensis release/win-unpacked release/Manju-Workbench-1.1.0-x64-Setup.exe
 ```
 
-这个安装程序按用户安装到 `%LOCALAPPDATA%\Programs\Manju Workbench`，并创建开始菜单入口和卸载项。也可用 Electron Builder 的 `portable` 目标生成免安装版本。
+自定义安装程序按用户安装到 `%LOCALAPPDATA%\Programs\Manju Workbench`，目录中包含 `漫剧工作台.exe` 和 `Uninstall.exe`。使用以下命令生成 `release/Manju-Workbench-1.1.0-x64-Portable.exe`。
+
+```sh
+npm run build
+npx electron-builder --win portable --x64
+```
 
 ## 更新发布清单
 
-标题栏的「检查更新」按需读取 `xjb1337/manju-workbench` 的正式 GitHub Release。标签使用 `1.2.3` 或 `v1.2.3`。每个版本随附件提供 `Manju-Workbench-1.2.3-win-x64.manifest.json`（UTF-8 JSON）。
+标题栏的「检查更新」按需读取 `xjb1337/manju-workbench` 的正式 GitHub Release。1.1.0 的标签可使用 `1.1.0` 或 `v1.1.0`。随 Release 提供 `Manju-Workbench-1.1.0-win-x64.manifest.json`（UTF-8 JSON），所有更新附件的下载地址必须逐字匹配 `https://github.com/xjb1337/manju-workbench/releases/download/<tag>/<fileName>`。
 
-- 根对象包含 `schemaVersion`（数字 `1`）、`version`（例如字符串 `"1.2.3"`）和 `assets`（数组）。
-- 每条附件包含 `fileName`、`size`（字节数）、`sha256`（64 位十六进制）和 `kind`。打包完成后记录最终文件的大小和摘要。PowerShell 可用 `(Get-Item -LiteralPath $file).Length` 和 `(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash`。
-- `setup` 使用自定义 NSIS 产物 `Manju-Workbench-1.2.3-x64-Setup.exe`。`portable` 使用 `Manju-Workbench-1.2.3-x64-Portable.exe` 或 `Manju-Workbench-1.2.3-x64-Portable.zip`。每种类型最多一份，名称须与附件逐字匹配。
+便携版与其他打包的 Windows x64 目录可下载便携包并自行替换。已校验的便携包保留在系统临时目录。
 
-更新器仅对识别出的自定义 NSIS 安装提供「安装」。便携版与其他打包的 Windows x64 目录可下载便携包并自行替换。已校验的便携包保留在系统临时目录。应用未签名，SHA-256 仅用于校验文件完整性。
+- 根对象包含 `schemaVersion`（数字 `1`）、`version`（字符串 `"1.1.0"`）和 `assets`（1–2 项）。
+- 每条附件包含 `fileName`、`size`（1 字节至 2 GiB，整数）、`sha256`（64 位十六进制）和 `kind`。每种类型最多一份，名称须与附件逐字匹配。
+- `setup` 使用自定义 NSIS 产物 `Manju-Workbench-1.1.0-x64-Setup.exe`。`portable` 使用 `Manju-Workbench-1.1.0-x64-Portable.exe` 或 `Manju-Workbench-1.1.0-x64-Portable.zip`。
+
+打包完成后，将最终附件路径传给本地脚本。清单写入第一个附件所在的目录。传入一份附件也可生成清单。`--sha256` 可另外生成 `Manju-Workbench-1.1.0-win-x64.sha256.txt`。
+
+```sh
+node scripts/write-update-manifest.cjs --sha256 release/Manju-Workbench-1.1.0-x64-Setup.exe release/Manju-Workbench-1.1.0-x64-Portable.exe
+```
