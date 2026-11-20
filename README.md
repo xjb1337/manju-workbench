@@ -13,6 +13,13 @@ npm run dev
 
 生产构建成功后可直接运行 `npm start`。Windows 安装包和便携包也使用上述独立安装的 FFmpeg 工具。
 
+## 1.5.0 发布说明
+
+- 新增每集背景音乐导入、启用与音量/淡入淡出设置，支持短音频循环、长音频裁切、配音压低音乐（ducking）与顺序预览混音试听。
+- 新增单镜静图运动效果（关闭 / 缓慢推近 / 拉远 / 平移），按画幅裁切填满并在预览、导出与分片缓存间保持一致。
+- 新增导出前「成片检查」，读取实际参与渲染的磁盘素材并区分缺素材、静图回退、缺配音、字幕过密、过期与阻断项，支持一键定位修复与复核确认。
+- 新增旧格式作品升级备份、配音与字幕稿管理及空作品引导；修复 FFmpeg 正式版识别（兼容 `gyan.dev` 等构建）、混音取消句柄释放、UNC/设备路径拦截、偏好配置逐项容错、弹窗与时间轴交互及校验边界问题。
+
 ## 1.4.0 发布说明
 
 - 扩展本机 / 局域网 OpenAI 兼容文本网关（默认 Magpie，内置 Ollama、LM Studio 预设与自定义地址），新增顶栏「AI 设置」、网关连接测试与模型列表探测，支持取消生成且不保存任何账户凭据。
@@ -90,10 +97,10 @@ xvfb-run -a -s '-screen 0 1600x1050x24' npm run verify:desktop
 ```sh
 npm run build
 npx electron-builder --win --dir --x64
-npm run pack:win:native -- /path/to/makensis release/win-unpacked release/Manju-Workbench-1.4.0-x64-Setup.exe
+npm run pack:win:native -- /path/to/makensis release/win-unpacked release/Manju-Workbench-1.5.0-x64-Setup.exe
 ```
 
-自定义安装程序默认按用户安装到 `%LOCALAPPDATA%\Programs\Manju Workbench`，支持在安装向导中修改安装位置并选择是否创建桌面快捷方式，目录中包含 `漫剧工作台.exe` 和 `Uninstall.exe`。使用以下命令生成 `release/Manju-Workbench-1.4.0-x64-Portable.exe`。
+自定义安装程序默认按用户安装到 `%LOCALAPPDATA%\Programs\Manju Workbench`，支持在安装向导中修改安装位置并选择是否创建桌面快捷方式，目录中包含 `漫剧工作台.exe` 和 `Uninstall.exe`。使用以下命令生成 `release/Manju-Workbench-1.5.0-x64-Portable.exe`。
 
 ```sh
 npm run build
@@ -102,18 +109,18 @@ npx electron-builder --win portable --x64
 
 ## 更新发布清单
 
-标题栏的「检查更新」按需读取 `xjb1337/manju-workbench` 的正式 GitHub Release。1.4.0 的标签可使用 `1.4.0` 或 `v1.4.0`。随 Release 提供 `Manju-Workbench-1.4.0-win-x64.manifest.json`（UTF-8 JSON），所有更新附件的下载地址必须逐字匹配 `https://github.com/xjb1337/manju-workbench/releases/download/<tag>/<fileName>`。
+标题栏的「检查更新」按需读取 `xjb1337/manju-workbench` 的正式 GitHub Release。1.5.0 的标签可使用 `1.5.0` 或 `v1.5.0`。随 Release 提供 `Manju-Workbench-1.5.0-win-x64.manifest.json`（UTF-8 JSON），所有更新附件的下载地址必须逐字匹配 `https://github.com/xjb1337/manju-workbench/releases/download/<tag>/<fileName>`。
 
 GitHub 限流、HTTP 403 或网络失败时，可用「打开发布页」在系统浏览器打开仓库的官方最新 Release 页。该入口用于手动更新。请按该发布的清单核对 SHA-256 和文件大小。应用内下载和安装资格仍以正式 Release 的来源、大小与哈希校验为准。
 
 官方 Setup 安装版会校验当前程序的规范目录、安装标识与当前用户注册表。安装确认会显示目标目录，Setup 会锁定并再次核验该目录。注册信息缺失、指向其他目录或无法核验时，应从发布页手动更新。便携版与其他打包的 Windows x64 目录可下载便携包并自行替换。已校验的便携包保留在系统临时目录。
 
-- 根对象包含 `schemaVersion`（数字 `1`）、`version`（字符串 `"1.4.0"`）和 `assets`（1–2 项）。
+- 根对象包含 `schemaVersion`（数字 `1`）、`version`（字符串 `"1.5.0"`）和 `assets`（1–2 项）。
 - 每条附件包含 `fileName`、`size`（1 字节至 2 GiB，整数）、`sha256`（64 位十六进制）和 `kind`。每种类型最多一份，名称须与附件逐字匹配。
-- `setup` 使用自定义 NSIS 产物 `Manju-Workbench-1.4.0-x64-Setup.exe`。`portable` 使用 `Manju-Workbench-1.4.0-x64-Portable.exe` 或 `Manju-Workbench-1.4.0-x64-Portable.zip`。
+- `setup` 使用自定义 NSIS 产物 `Manju-Workbench-1.5.0-x64-Setup.exe`。`portable` 使用 `Manju-Workbench-1.5.0-x64-Portable.exe` 或 `Manju-Workbench-1.5.0-x64-Portable.zip`。
 
-打包完成后，将最终附件路径传给本地脚本。清单写入第一个附件所在的目录。传入一份附件也可生成清单。`--sha256` 可另外生成 `Manju-Workbench-1.4.0-win-x64.sha256.txt`。
+打包完成后，将最终附件路径传给本地脚本。清单写入第一个附件所在的目录。传入一份附件也可生成清单。`--sha256` 可另外生成 `Manju-Workbench-1.5.0-win-x64.sha256.txt`。
 
 ```sh
-node scripts/write-update-manifest.cjs --sha256 release/Manju-Workbench-1.4.0-x64-Setup.exe release/Manju-Workbench-1.4.0-x64-Portable.exe
+node scripts/write-update-manifest.cjs --sha256 release/Manju-Workbench-1.5.0-x64-Setup.exe release/Manju-Workbench-1.5.0-x64-Portable.exe
 ```
