@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { constants } from 'node:fs'
+import { constants, createReadStream } from 'node:fs'
 import { copyFile, cp, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, rmdir } from 'node:fs/promises'
 import path from 'node:path'
 import { lock } from 'proper-lockfile'
 import {
-  emptyTrack, extensions, folderNameSchema, idSchema, mediaTargetSchema, mutationSchema, projectSchema, projectSchemaVersion,
+  audibleMusic, defaultMusicSettings, emptyTrack, extensions, folderNameSchema, idSchema, importTargetSchema, mutationSchema, projectSchema, projectSchemaVersion,
   versionSchema, type Episode, type MediaKind, type MediaTarget, type Mutation, type Project, type Shot, type Version,
 } from '../shared/model'
 import { frameSpec, shotMethod, type Ratio } from '../shared/creative'
@@ -33,6 +33,13 @@ type OrphanCandidate = { bytes: number; fingerprint: string }
 
 function projectFingerprint(json: string) {
   return createHash('sha256').update(json).digest('hex')
+}
+
+export async function fileFingerprint(file: string, signal?: AbortSignal) {
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(file, { signal })) hash.update(chunk)
+  signal?.throwIfAborted()
+  return hash.digest('hex')
 }
 
 async function orphanCandidate(file: string): Promise<OrphanCandidate | undefined> {
@@ -216,6 +223,15 @@ function mutate(project: Project, change: Mutation) {
     case 'episode.remove':
       project.episodes = project.episodes.filter(episode => episode.id !== change.episodeId)
       break
+    case 'music.edit': {
+      const episode = findEpisode(project, change.episodeId)
+      if (!episode.music) throw new Error('请先导入背景音乐')
+      episode.music = { ...change.settings, version: episode.music.version }
+      break
+    }
+    case 'music.remove':
+      delete findEpisode(project, change.episodeId).music
+      break
     case 'shot.add': {
       const episode = findEpisode(project, change.episodeId)
       const target = project.brief?.targetSeconds
@@ -243,6 +259,7 @@ function mutate(project: Project, change: Mutation) {
         prompt: source.prompt,
         ...(source.videoPrompt !== undefined && { videoPrompt: source.videoPrompt }),
         ...(source.method !== undefined && { method: source.method }),
+        ...(source.motion !== undefined && { motion: source.motion }),
         status: '待制作',
         media: { image: emptyTrack(), video: emptyTrack(), audio: emptyTrack() },
         ...(source.omittedMedia && { omittedMedia: { ...source.omittedMedia } }),
@@ -302,8 +319,10 @@ function mutate(project: Project, change: Mutation) {
 }
 
 export function allVersions(project: Project) {
-  const media = project.episodes.flatMap(episode => episode.shots.flatMap(shot =>
-    Object.values(shot.media).flatMap(track => track.versions)))
+  const media = project.episodes.flatMap(episode => [
+    ...(episode.music ? [episode.music.version] : []),
+    ...episode.shots.flatMap(shot => Object.values(shot.media).flatMap(track => track.versions)),
+  ])
   return media.concat([...project.characters, ...project.scenes].flatMap(reference => reference.image.versions))
 }
 
@@ -352,7 +371,16 @@ export class ProjectStore {
     const json = await readProjectFile(file)
     const document = projectSchema.parse(JSON.parse(json))
     await checkedDirectory(path.join(root, directoryName))
-    return new ProjectStore(root, document, json)
+    const store = new ProjectStore(root, document, json)
+    for (const episode of document.episodes) {
+      const music = audibleMusic(episode)
+      const record = episode.exportRecord
+      if (music && record && !record.stale) {
+        const hash = await store.assetPath(music.version).then(file => fileFingerprint(file)).catch(() => undefined)
+        if (!hash || hash !== record.musicHash) record.stale = true
+      }
+    }
+    return store
   }
 
   get needsUpgrade() {
@@ -411,6 +439,10 @@ export class ProjectStore {
     return structuredClone(this.document)
   }
 
+  async assertDiskCurrent() {
+    await this.assertCurrent(path.join(this.root, projectFilename))
+  }
+
   private queue<T>(work: () => Promise<T>): Promise<T> {
     const result = this.tail.then(work)
     this.tail = result.catch(() => {})
@@ -436,11 +468,11 @@ export class ProjectStore {
     }
   }
 
-  private async assertCurrent(file: string, assertLock: () => void) {
+  private async assertCurrent(file: string, assertLock?: () => void) {
     if (await readProjectFile(file) !== this.savedJson) {
       throw new ProjectConflictError('磁盘上的作品已变更，请重新打开作品后再保存')
     }
-    assertLock()
+    assertLock?.()
   }
 
   private async commit(next: Project, file: string, assertLock: () => void) {
@@ -464,7 +496,8 @@ export class ProjectStore {
     const change = mutationSchema.parse(input)
     return this.queue(() => this.withProjectLock(async (file, assertLock) => {
       const next = this.snapshot
-      const removedVersion = change.type === 'media.remove' ? this.findVersion(change.versionId) : undefined
+      const removedVersion = change.type === 'media.remove' ? this.findVersion(change.versionId)
+        : change.type === 'music.remove' ? findEpisode(next, change.episodeId).music?.version : undefined
       mutate(next, change)
       const committed = await this.commit(next, file, assertLock)
       if (removedVersion && !this.versionIndex.has(removedVersion.id)) {
@@ -580,12 +613,12 @@ export class ProjectStore {
     })
   }
 
-  recordExport(rendered: Episode, ratio: Ratio = frameSpec(this.document).ratio, renderedProject = this.document) {
+  recordExport(rendered: Episode, ratio: Ratio = frameSpec(this.document).ratio, renderedProject = this.document, musicHash?: string) {
     return this.queue(async () => {
       const next = this.snapshot
       const episode = findEpisode(next, rendered.id)
       if (frameSpec(next).ratio !== ratio || exportInputsChanged(rendered, episode, renderedProject, next)) throw new Error('成片内容已变更')
-      episode.exportRecord = { exportedAt: new Date().toISOString(), stale: false }
+      episode.exportRecord = { exportedAt: new Date().toISOString(), stale: false, ...(musicHash && { musicHash }) }
       return this.withProjectLock((file, assertLock) => this.commit(next, file, assertLock))
     })
   }
@@ -599,12 +632,12 @@ export class ProjectStore {
   }
 
   importMedia(input: unknown, source: string) {
-    const target = mediaTargetSchema.parse(input)
-    const kind: MediaKind = target.scope === 'shot' ? target.kind : 'image'
+    const target = importTargetSchema.parse(input)
+    const kind: MediaKind = target.scope === 'shot' ? target.kind : target.scope === 'music' ? 'audio' : 'image'
     return this.queue(async () => {
       this.assertWritable()
       const project = this.snapshot
-      const track = trackFor(project, target)
+      const previousMusic = target.scope === 'music' ? findEpisode(project, target.episodeId).music : undefined
       const extension = path.extname(source).slice(1).toLowerCase()
       if (!extensions[kind].includes(extension)) throw new Error('文件扩展名与素材类型不匹配')
       const stat = await checkedFile(source)
@@ -644,14 +677,21 @@ export class ProjectStore {
           ...(seconds !== undefined && { seconds }),
           ...(kind === 'video' && { hasAudio: !!audio }),
         })
-        track.versions.push(version)
-        track.activeId = id
-        resumeMedia(project, target)
+        if (target.scope === 'music') {
+          findEpisode(project, target.episodeId).music = { ...(previousMusic ?? defaultMusicSettings), version }
+        } else {
+          const track = trackFor(project, target)
+          track.versions.push(version)
+          track.activeId = id
+          resumeMedia(project, target)
+        }
         return await this.withProjectLock(async (projectFile, assertLock) => {
           await this.assertCurrent(projectFile, assertLock)
           await safeRename(temp, file)
           try {
-            return await this.commit(project, projectFile, assertLock)
+            const committed = await this.commit(project, projectFile, assertLock)
+            if (previousMusic) await this.removeMediaFile(previousMusic.version, assertLock)
+            return committed
           } catch (error) {
             await rm(file, { force: true }).catch(() => {})
             throw error

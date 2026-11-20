@@ -1,24 +1,27 @@
 import { randomUUID } from 'node:crypto'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, protocol, screen, session, shell } from 'electron'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { z } from 'zod'
 import type { RenderProgress, RenderResult, Reply } from '../shared/api'
-import { extensions, folderNameSchema, idSchema, mediaTargetSchema, mutationSchema } from '../shared/model'
+import { extensions, folderNameSchema, idSchema, importTargetSchema, mediaTargetSchema, mutationSchema } from '../shared/model'
 import { detailKindSchema, detailTextSchema, frameSpec, generationKindSchema, generationPresets, generationToolUrl } from '../shared/creative'
 import { aiBaseUrlSchema, aiGatewayConfigSchema, aiInstructionSchema, aiRequestTargetSchema, magpieScriptSchema } from '../shared/plan'
 import { magpiePlanningPrompt, scriptAiPrompt, shotDetailAiPrompt } from '../shared/prompts'
 import { generateAiTextDraft, generateMagpiePlan, testAiGateway } from './magpie'
 import { describeAiGateway } from './ai-gateway'
 import { mediaResponse } from './media-protocol'
+import { inspectEpisode, preflightAllows } from './preflight'
+import { ffmpegTools } from './process'
 import { exportDestination, renderEpisode, writeEpisodeSrt } from './render'
 import { fillSample, fillVerticalSample } from './sample'
 import { RecentProjects, themeSchema, type WindowBounds } from './recent-projects'
 import { WorkbenchSession } from './session'
 import { findEpisode, findShot, OrphanMediaPreviewError, ProjectConflictError, ProjectStore } from './storage'
 import { cleanupStaleTempDirs, staleTempAgeMs, staleTempPrefixes } from './temp-cleanup'
+import { openOfficialReleasePage } from './update-release'
 import { createProductionUpdater } from './update-system'
 import { InvalidUpdatePackageError, ManualUpdateRequiredError, type Updater } from './updater'
 import { resolveInitialBounds, themeBackground } from './window-state'
@@ -111,6 +114,23 @@ function handle<T>(channel: string, fn: (win: BrowserWindow, ...args: unknown[])
 
 function wire() {
   handle('app:editor-dirty', (_win, value) => { workbench.editorDirty = z.boolean().parse(value); return null })
+  handle('ffmpeg:detect', () => workbench.serial(() => ffmpegTools.refresh()))
+  handle('ffmpeg:choose-directory', win => workbench.serial(async () => {
+    const selected = await dialog.showOpenDialog(win, {
+      title: '选择可信的 FFmpeg 工具目录', properties: ['openDirectory'],
+      defaultPath: recent.ffmpegDirectory ?? undefined,
+    })
+    if (selected.canceled || !selected.filePaths[0]) return null
+    const directory = await realpath(selected.filePaths[0])
+    await recent.setFfmpegDirectory(directory)
+    ffmpegTools.configure(directory)
+    return ffmpegTools.refresh()
+  }))
+  handle('ffmpeg:use-path', () => workbench.serial(async () => {
+    await recent.setFfmpegDirectory(null)
+    ffmpegTools.configure(null)
+    return ffmpegTools.refresh()
+  }))
   handle('app:set-theme', async (win, value) => {
     const theme = themeSchema.parse(value)
     if (!win.isDestroyed()) win.setBackgroundColor(themeBackground(theme))
@@ -123,7 +143,7 @@ function wire() {
   }))
   handle('update:cancel', () => updater.cancel())
   handle('update:open-releases', async () => {
-    await shell.openExternal('https://github.com/xjb1337/manju-workbench/releases')
+    await openOfficialReleasePage(url => shell.openExternal(url))
     return null
   })
   handle('update:open-folder', async () => {
@@ -272,9 +292,9 @@ function wire() {
   handle('plan:merge', (win, key, token, replacements) => workbench.serial(async () => (await writableProject(win, key)).mergePlan(token, replacements)))
   handle('project:import', (win, key, input) => workbench.serial(async () => {
     const store = workbench.getStore(key)
-    const target = mediaTargetSchema.parse(input)
-    const kind = target.scope === 'shot' ? target.kind : 'image'
-    const label = { image: '参考图', video: '视频', audio: '配音' }[kind]
+    const target = importTargetSchema.parse(input)
+    const kind = target.scope === 'shot' ? target.kind : target.scope === 'music' ? 'audio' : 'image'
+    const label = target.scope === 'music' ? '背景音乐' : { image: '参考图', video: '视频', audio: '配音' }[kind]
     const selected = await dialog.showOpenDialog(win, { title: `导入${label}`, properties: ['openFile'],
       defaultPath: await recent.defaultDirectory('media', store.root), filters: [{ name: label, extensions: extensions[kind] }] })
     if (selected.canceled || !selected.filePaths[0]) return null
@@ -319,12 +339,29 @@ function wire() {
     return target
   }))
   handle('episode:cancel', () => workbench.cancelRender())
-  handle('episode:render', (win, key, id, value, rebuildInput) => workbench.serial(async (): Promise<RenderResult> => {
+  handle('episode:preflight', (_win, key, id) => workbench.serial(async () => {
+    const store = workbench.getStore(key)
+    const project = store.snapshot
+    const episode = findEpisode(project, idSchema.parse(id))
+    const state = { controller: new AbortController(), publishing: false }
+    workbench.job = state
+    try {
+      return await inspectEpisode(store, project, episode, state.controller.signal)
+    } catch (error) {
+      if (state.controller.signal.aborted) return null
+      throw error
+    } finally {
+      workbench.job = null
+    }
+  }))
+  handle('episode:render', (win, key, id, value, rebuildInput, reviewInput) => workbench.serial(async (): Promise<RenderResult> => {
     const mode = z.enum(['preview', 'export']).parse(value)
     const rebuild = z.boolean().default(false).parse(rebuildInput)
-    const store = mode === 'export' ? await writableProject(win, key) : workbench.getStore(key)
-    const projectSnapshot = store.snapshot
-    const episode = findEpisode(projectSnapshot, idSchema.parse(id))
+    const review = z.string().regex(/^[a-f0-9]{64}$/).optional().parse(reviewInput)
+    const episodeId = idSchema.parse(id)
+    let store = workbench.getStore(key)
+    let projectSnapshot = store.snapshot
+    let episode = findEpisode(projectSnapshot, episodeId)
     const state = { controller: new AbortController(), publishing: false }
     workbench.job = state
     const signal = state.controller.signal
@@ -335,11 +372,18 @@ function wire() {
         previewDir = await mkdtemp(path.join(tmpdir(), 'manju-preview-'))
         target = path.join(previewDir, 'preview.mp4')
       } else {
+        const initial = await inspectEpisode(store, projectSnapshot, episode, signal)
+        if (!preflightAllows(initial, review)) return { status: 'preflight', report: initial }
+        store = await writableProject(win, key)
+        projectSnapshot = store.snapshot
+        episode = findEpisode(projectSnapshot, episodeId)
         const label = exportLabel(episode.title)
         const selected = await dialog.showSaveDialog(win, { title: '导出 MP4', defaultPath: path.join(store.root, `成片 - ${label}.mp4`),
           filters: [{ name: 'MP4', extensions: ['mp4'] }] })
         if (selected.canceled || !selected.filePath) return { status: 'canceled' } as const
         signal.throwIfAborted()
+        const confirmed = await inspectEpisode(store, projectSnapshot, episode, signal)
+        if (!preflightAllows(confirmed, review)) return { status: 'preflight', report: confirmed }
         target = await exportDestination(selected.filePath, store.root)
       }
       const progress = (percent: number) => {
@@ -350,12 +394,14 @@ function wire() {
       }
       if (mode === 'preview' && rebuild) await workbench.dropShotCache()
       const cacheDir = await workbench.ensureShotCache()
-      await renderEpisode(store, episode, target, {
-        signal, progress, project: projectSnapshot, cacheDir, publish: () => { state.publishing = true },
+      const { musicHash } = await renderEpisode(store, episode, target, {
+        signal, progress, project: projectSnapshot, cacheDir,
+        beforePublish: mode === 'export' ? () => store.assertDiskCurrent() : undefined,
+        publish: () => { state.publishing = true },
       })
       if (!previewDir) {
         try {
-          const project = await store.recordExport(episode, frameSpec(projectSnapshot).ratio, projectSnapshot)
+          const project = await store.recordExport(episode, frameSpec(projectSnapshot).ratio, projectSnapshot, musicHash)
           return { status: 'completed', mode: 'export', location: target, project }
         } catch (error) {
           // The validated MP4 has been published. Report the separate project write failure.
@@ -479,6 +525,7 @@ if (app.requestSingleInstanceLock()) {
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
     updater = createProductionUpdater()
     recent = await RecentProjects.open(app.getPath('userData'))
+    ffmpegTools.configure(recent.ffmpegDirectory)
     wire()
     createWindow()
     void cleanupStaleTempDirs(tmpdir(), staleTempPrefixes, staleTempAgeMs)

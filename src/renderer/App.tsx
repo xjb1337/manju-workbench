@@ -1,15 +1,18 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ArrowSquareOut, Broom, Check, FilmSlate, FolderOpen, Moon, Plus, SlidersHorizontal, Sparkle, Sun, WarningCircle, X } from '@phosphor-icons/react'
-import type { OpenProject, OrphanMediaPreview, RecentProject, RenderProgress, Reply, ReplyError } from '../shared/api'
-import { frameSpec, generationLabels, generationToolName, shotMethod, workTypeLabels, type DetailKind, type GenerationKind } from '../shared/creative'
-import { folderNameSchema, type MediaTarget, type Mutation, type Project, type Track } from '../shared/model'
+import type { OpenProject, OrphanMediaPreview, PreflightIssue, PreflightReport, RecentProject, RenderProgress, Reply, ReplyError } from '../shared/api'
+import { frameSpec, generationLabels, generationToolName, shotMethod, usesFinishedVideo, workTypeLabels, type DetailKind, type GenerationKind } from '../shared/creative'
+import { folderNameSchema, type ImportTarget, type MediaKind, type MediaTarget, type Mutation, type Project, type Track } from '../shared/model'
 import { defaultAiGatewayConfig, type AiGatewayConfig } from '../shared/plan'
-import { exportFallbacks, productionProgress, type StepId } from '../shared/production'
+import { productionProgress, type StepId } from '../shared/production'
 import { legacyDetail, savedShotPrompt } from '../shared/prompts'
 import { AiSettingsDialog, sameGateway, ScriptAiDialog, type AiPanelOptions, type GatewayProbe } from './AiPanels'
-import { Badge, Modal, NameModal, PreviewPlayer, kindLabel, sequence } from './components'
+import { Badge, Modal, NameModal, PreviewPlayer, kindLabel } from './components'
 import { BriefPanel, DetailDialog, PlanImportDialog, PlanningDialog } from './CreativePanels'
 import { Inspector } from './Inspector'
+import { FfmpegPanel } from './FfmpegPanel'
+import { MusicPanel } from './MusicPanel'
+import { PreflightPanel } from './PreflightPanel'
 import { ProductionGuide, isShotStep } from './ProductionGuide'
 import { ShotStage } from './ShotStage'
 import { UpdatePanel } from './UpdatePanel'
@@ -18,12 +21,13 @@ import { ProjectSidebar, ReferenceView, ScriptView, type Tab } from './Workspace
 import { useWorkbenchShortcuts } from './useWorkbenchShortcuts'
 
 type EditorField = 'shot-prompt' | 'shot-video-prompt' | 'shot-dialogue' | 'script-text' | 'generation-image-name' | 'generation-video-name'
+  | `shot-import-${MediaKind}` | `shot-keep-${MediaKind}` | 'music-import'
 type Ask =
   | { kind: 'name'; title: string; initial?: string; confirm: string; action: (name: string) => Promise<boolean> }
   | { kind: 'remove'; title: string; name: string; change: Mutation }
   | { kind: 'clean-orphans'; report: OrphanMediaPreview; stale?: boolean }
   | { kind: 'discard'; action: () => void }
-  | { kind: 'export'; fallbacks: ReturnType<typeof exportFallbacks> }
+  | { kind: 'preflight'; report: PreflightReport }
 
 const api = window.workbench
 const themeStorageKey = 'manju:theme'
@@ -57,7 +61,10 @@ export function App() {
   const [dark, setDark] = useState(readDarkTheme)
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState<RenderProgress | null>(null)
+  const [checking, setChecking] = useState(false)
   const [player, setPlayer] = useState('')
+  const [musicOpen, setMusicOpen] = useState(false)
+  const [ffmpegOpen, setFfmpegOpen] = useState(false)
   const [message, setMessage] = useState<{ text: string; error?: boolean } | null>(null)
   const [ask, setAsk] = useState<Ask | null>(null)
   const [upgradeRequest, setUpgradeRequest] = useState<string | null>(null)
@@ -148,7 +155,7 @@ export function App() {
     shotIndex,
     busy,
     dirty,
-    hasModalOpen: Boolean(ask || creativeDialog || progress || player || aiSettingsOpen || scriptAi),
+    hasModalOpen: Boolean(ask || creativeDialog || progress || checking || player || aiSettingsOpen || scriptAi || musicOpen || ffmpegOpen),
     onSelectShot: selectShot,
   })
 
@@ -202,6 +209,7 @@ export function App() {
     setTab('shots')
     setGuideStep(null)
     setCreativeDialog(null)
+    setMusicOpen(false)
     setMagpieSeedScript(null)
     setScriptAi(null)
     setScriptScope('project')
@@ -228,7 +236,7 @@ export function App() {
     })
   }
 
-  function importMedia(target: MediaTarget) {
+  function importMedia(target: ImportTarget) {
     if (opened) void run(() => api.importMedia(opened.mediaKey, target), accept)
   }
   function activate(target: MediaTarget, id: string) {
@@ -372,12 +380,13 @@ export function App() {
     })
   }
 
-  async function render(mode: RenderProgress['mode'], rebuild = false) {
+  async function render(mode: RenderProgress['mode'], rebuild = false, review?: string) {
     if (!opened || !episode || running.current) return
     setProgress({ mode, percent: 0 })
     try {
-      await run(() => api.render(opened.mediaKey, episode.id, mode, rebuild), result => {
+      await run(() => api.render(opened.mediaKey, episode.id, mode, rebuild, review), result => {
         if (result.status === 'canceled') setMessage({ text: mode === 'export' ? '已取消导出' : '已取消预览' })
+        else if (result.status === 'preflight') setAsk({ kind: 'preflight', report: result.report })
         else if (result.status === 'record-failed') setMessage({ text: `成片已导出 · 导出记录保存失败 · ${result.location}`, error: true })
         else if (result.mode === 'preview') setPlayer(result.location)
         else {
@@ -406,10 +415,43 @@ export function App() {
   }
 
   function requestExport() {
-    if (!project || !episode || !canRender) return
-    const fallbacks = exportFallbacks(project, episode)
-    if (fallbacks.length) setAsk({ kind: 'export', fallbacks })
-    else void render('export')
+    if (canRender) void render('export')
+  }
+
+  async function checkEpisode() {
+    if (!opened || !episode || !canRender) return
+    setChecking(true)
+    try {
+      await run(() => api.inspectEpisode(opened.mediaKey, episode.id), report => {
+        if (report) setAsk({ kind: 'preflight', report })
+      })
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  function locateIssue(report: PreflightReport, issue: PreflightIssue) {
+    if (!project) return
+    const targetEpisode = project.episodes.find(item => item.id === report.episodeId)
+    const targetShot = targetEpisode?.shots.find(item => item.id === issue.shot?.id)
+    goTo('shots', () => {
+      setAsk(null)
+      setEpisodeId(report.episodeId)
+      if (targetShot) setShotId(targetShot.id)
+      const target = issue.target
+      if (target === 'music') {
+        setMusicOpen(true)
+        setFocusField('music-import')
+      } else if (target === 'dialogue') {
+        setGuideStep('audio')
+        setFocusField('shot-dialogue')
+      } else if (target === 'shots') {
+        setGuideStep('shots')
+      } else {
+        setGuideStep(target === 'video' && usesFinishedVideo(shotMethod(project, targetShot)) ? 'finished' : target)
+        setFocusField(issue.code === 'stale' ? `shot-keep-${target}` : `shot-import-${target}`)
+      }
+    }, targetEpisode?.id !== episode?.id || (!!targetShot && targetShot.id !== shot?.id))
   }
 
   function generationAction(kind: GenerationKind, inGuide = false) {
@@ -501,6 +543,7 @@ export function App() {
           <SlidersHorizontal size={17} />
           <span>AI 设置</span>
         </button>
+        <button className="subtle" onClick={() => setFfmpegOpen(true)} disabled={busy}>FFmpeg 设置</button>
         <UpdatePanel busy={busy} dirty={dirty} />
         <button className="icon subtle" aria-label={dark ? '切换浅色' : '切换深色'} title={dark ? '切换浅色' : '切换深色'}
           onClick={() => setDark(!dark)}>{dark ? <Sun size={19} /> : <Moon size={19} />}</button>
@@ -535,8 +578,9 @@ export function App() {
           }} />
         {tab === 'shots' ? <ShotStage opened={opened} episode={episode} shot={shot} shotIndex={shotIndex} spec={spec}
           method={method} busy={busy} canRender={canRender} playerOpen={Boolean(player)}
-          onOpenEpisodeScript={() => goToScript('episode')}
-          onPreview={() => void render('preview')} onRebuildPreview={() => void render('preview', true)} onExport={requestExport} onExportSrt={exportSrt}
+          onOpenEpisodeScript={() => goToScript('episode')} onMusic={() => { setMessage(null); setMusicOpen(true) }}
+          onPreview={() => void render('preview')} onRebuildPreview={() => void render('preview', true)}
+          onExport={requestExport} onCheck={() => void checkEpisode()} onExportSrt={exportSrt}
           onAddPrimary={() => episode ? addShot() : addEpisode()}
           hasScript={hasScript} onWriteScript={writeScript} onMagpie={() => openMagpieDialog()}
           onImportPlan={() => setCreativeDialog('import')}
@@ -644,7 +688,7 @@ export function App() {
       {message?.error && <p className="inline-error" role="alert">{message.text}</p>}
       <div className="dialog-actions"><button onClick={() => { setAsk(null); setMessage(null) }} disabled={busy}>取消</button>
         <button className="destructive" disabled={busy} onClick={() => void edit(ask.change, () => {
-          if (ask.change.type !== 'media.remove') setDirty(false)
+          if (ask.change.type !== 'media.remove' && ask.change.type !== 'music.remove') setDirty(false)
           setAsk(null)
         })}>删除</button></div>
     </Modal>}
@@ -676,16 +720,23 @@ export function App() {
       <div className="dialog-actions"><button autoFocus onClick={() => setAsk(null)}>继续编辑</button>
         <button className="destructive" onClick={() => { const action = ask.action; setAsk(null); action() }}>放弃修改</button></div>
     </Modal>}
-    {ask?.kind === 'export' && <Modal title="确认导出替代画面" onClose={() => setAsk(null)}>
-      <p className="risk"><WarningCircle aria-hidden="true" size={20} />{ask.fallbacks.length} 个镜头缺少所需画面，成片会使用下列替代画面。</p>
-      <ul className="export-fallbacks">{ask.fallbacks.map(({ index, title, label }) => <li key={index}>
-        <span>{sequence(index)} · {title}</span><strong>{label}</strong>
-      </li>)}</ul>
-      <div className="dialog-actions">
-        <button autoFocus onClick={() => setAsk(null)}>返回补素材</button>
-        <button className="primary" onClick={() => { setAsk(null); void render('export') }}>继续导出</button>
-      </div>
+    {checking && <Modal title="成片检查" onClose={() => void api.cancelRender()}>
+      <p role="status">正在检查…</p>
+      <div className="dialog-actions"><button onClick={() => void api.cancelRender()}>取消检查</button></div>
     </Modal>}
+    {ask?.kind === 'preflight' && !progress && !checking && <PreflightPanel report={ask.report}
+      onClose={() => setAsk(null)} onSelect={issue => locateIssue(ask.report, issue)}
+      onExport={() => { setAsk(null); void render('export', false, ask.report.review) }} />}
+    {musicOpen && episode && <MusicPanel key={JSON.stringify(episode.music)} music={episode.music} busy={busy} canPreview={canRender}
+      error={message?.error ? message.text : undefined}
+      onClose={() => { if (!busy) { setMusicOpen(false); setMessage(null) } }}
+      onImport={() => importMedia({ scope: 'music', episodeId: episode.id })}
+      onSave={settings => void edit({ type: 'music.edit', episodeId: episode.id, settings })}
+      onRemove={() => {
+        setMusicOpen(false)
+        remove('移除背景音乐', episode.music!.version.name, { type: 'music.remove', episodeId: episode.id })
+      }}
+      onPreview={() => { setMusicOpen(false); void render('preview') }} />}
     {progress && <Modal title={progress.mode === 'preview' ? '生成顺序预览' : '导出 MP4'} onClose={() => void api.cancelRender()}>
       <p className="render-spec">{spec.ratio} · {spec.width} × {spec.height} · 30 fps</p>
       <div className="progress-line"><progress max={100} value={progress.percent} /><span>{progress.percent}%</span></div>
@@ -696,6 +747,7 @@ export function App() {
       {message?.error && <p className="inline-error" role="alert">{message.text}</p>}
       <div className="dialog-actions"><button onClick={() => setPlayer('')}>关闭预览</button></div>
     </Modal>}
+    {ffmpegOpen && <FfmpegPanel onClose={() => setFfmpegOpen(false)} />}
     {aiSettingsOpen && <AiSettingsDialog config={aiConfig} probe={gatewayProbe} busy={busy}
       onEndpointChange={() => setGatewayProbe(null)}
       onTest={next => void run(() => api.testAiConnection(next),

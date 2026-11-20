@@ -8,7 +8,7 @@ const api = window.workbench
 export function UpdatePanel({ busy, dirty }: { busy: boolean; dirty: boolean }) {
   const [visible, setVisible] = useState(false)
   const [check, setCheck] = useState<UpdateCheck | null>(null)
-  const [pending, setPending] = useState<'check' | 'download' | 'install' | 'folder' | null>(null)
+  const [pending, setPending] = useState<'check' | 'download' | 'install' | 'folder' | 'release' | null>(null)
   const [progress, setProgress] = useState<UpdateProgress | null>(null)
   const [canceled, setCanceled] = useState(false)
   const [canceling, setCanceling] = useState(false)
@@ -17,6 +17,7 @@ export function UpdatePanel({ busy, dirty }: { busy: boolean; dirty: boolean }) 
   const [dirtyBlocked, setDirtyBlocked] = useState(false)
   const [error, setError] = useState('')
   const available = check?.status === 'available' ? check : null
+  const manual = available?.manual || check?.status === 'offline' || check?.status === 'forbidden' || check?.status === 'rate-limited'
   const percent = progress ? Math.floor(progress.received * 100 / progress.total) : 0
 
   useEffect(() => api.onUpdateProgress(setProgress), [])
@@ -65,7 +66,7 @@ export function UpdatePanel({ busy, dirty }: { busy: boolean; dirty: boolean }) 
 
   function close() {
     if (pending === 'download') void cancel()
-    else if (!starting && pending !== 'install' && pending !== 'folder') setVisible(false)
+    else if (!starting && pending !== 'install' && pending !== 'folder' && pending !== 'release') setVisible(false)
   }
 
   function download() {
@@ -100,9 +101,12 @@ export function UpdatePanel({ busy, dirty }: { busy: boolean; dirty: boolean }) 
             : pending === 'install' ? '等待安装确认…'
             : check?.status === 'none' ? '暂无发布'
             : check?.status === 'latest' ? '已是最新版本'
+            : check?.status === 'rate-limited' ? 'GitHub 更新检查已限流'
+            : check?.status === 'forbidden' ? 'GitHub 拒绝更新请求（HTTP 403）'
+            : check?.status === 'offline' ? '更新网络连接失败'
             : available ? `发现新版本 ${available.version}` : ''}
         </p>
-        {check && check.status !== 'none' && <section className="update-notes" aria-label="更新说明">
+        {(check?.status === 'latest' || check?.status === 'available') && <section className="update-notes" aria-label="更新说明">
           <h3>更新说明{check.status === 'latest' && ` · ${check.version}`}</h3>
           <p tabIndex={check.notes ? 0 : undefined}>{check.notes || '暂无更新说明'}</p>
         </section>}
@@ -114,6 +118,7 @@ export function UpdatePanel({ busy, dirty }: { busy: boolean; dirty: boolean }) 
           </p>
           {available.unavailable && <p className="inline-error" role="alert">{available.unavailable}</p>}
         </>}
+        {manual && <p>手动下载后，请按官方发布清单核对 SHA-256 和文件大小。</p>}
         {pending === 'download' && <>
           <p role="status">{canceling ? '正在取消…' : percent === 100 ? '正在校验更新包…' : '正在下载更新…'}</p>
           <div className="progress-line"><progress aria-label="下载进度" max={100} value={percent} /><span>{percent}%</span></div>
@@ -126,10 +131,10 @@ export function UpdatePanel({ busy, dirty }: { busy: boolean; dirty: boolean }) 
       </div>
       <div className="dialog-actions update-actions">
         {pending === 'download' ? <button onClick={() => void cancel()} disabled={canceling}>取消下载</button> : <>
-          <button onClick={close} autoFocus disabled={starting || pending === 'install' || pending === 'folder'}>{dirtyBlocked ? '返回保存' : '关闭'}</button>
+          <button onClick={close} autoFocus disabled={starting || pending === 'install' || pending === 'folder' || pending === 'release'}>{dirtyBlocked ? '返回保存' : '关闭'}</button>
           <button onClick={refresh} disabled={!!pending || starting}>重新检查</button>
-          {available?.manual && <button className="primary" disabled={!!pending}
-            onClick={() => void action('folder', api.openUpdateReleasePage, () => {})}>打开发布页</button>}
+          {manual && <button className="primary" disabled={!!pending}
+            onClick={() => void action('release', api.openUpdateReleasePage, () => {})}>打开发布页</button>}
           {available?.kind && <>
             <button className={ready ? undefined : 'primary'} onClick={download} disabled={!!pending || !!ready || !!available.unavailable}>下载</button>
             {available.kind === 'setup'

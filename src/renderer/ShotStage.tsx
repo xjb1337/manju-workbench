@@ -26,9 +26,11 @@ export function ShotStage({
   canRender,
   playerOpen,
   onOpenEpisodeScript,
+  onMusic,
   onPreview,
   onRebuildPreview,
   onExport,
+  onCheck,
   onExportSrt,
   onAddPrimary,
   hasScript,
@@ -53,9 +55,11 @@ export function ShotStage({
   canRender: boolean
   playerOpen: boolean
   onOpenEpisodeScript: () => void
+  onMusic: () => void
   onPreview: () => void
   onRebuildPreview: () => void
   onExport: () => void
+  onCheck: () => void
   onExportSrt: () => void
   onAddPrimary: () => void
   hasScript: boolean
@@ -99,12 +103,14 @@ export function ShotStage({
         <span className="stage-count">{episode.shots.length} 镜头 <span>·</span> {timecode(totalFrames(episode))}</span>
         <button className="icon small subtle" title="集数剧本" aria-label="集数剧本" disabled={busy}
           onClick={onOpenEpisodeScript}><FileText size={17} /></button>
+        <button className="subtle" disabled={busy} onClick={onMusic}>背景音乐</button>
       </>}</div>
       {shot && <div className="actions stage-render-actions">
         <span className="export-size">{spec.width} × {spec.height}</span>
         <button disabled={!canRender} onClick={onPreview}><Play size={16} weight="fill" /> 顺序预览</button>
         {shot && <button className="subtle" disabled={!canRender} onClick={onRebuildPreview}>重新生成预览</button>}
         {shot && <button disabled={!canRender || !episode?.shots.some(item => item.dialogue.trim())} onClick={onExportSrt}>导出 SRT</button>}
+        <button disabled={!canRender} onClick={onCheck}>成片检查</button>
         <button className="primary" disabled={!canRender} onClick={onExport}><DownloadSimple size={18} /> 导出 MP4</button>
       </div>}
     </div>

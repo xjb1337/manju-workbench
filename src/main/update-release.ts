@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
-import type { UpdateKind } from '../shared/api'
+import type { UpdateConnectionStatus, UpdateKind } from '../shared/api'
 
 const repository = '/xjb1337/manju-workbench'
 const releasesUrl = `https://api.github.com/repos${repository}/releases`
+const officialLatestReleaseUrl = `https://github.com${repository}/releases/latest`
 const assetHosts = new Set(['github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com'])
 const stableVersion = /^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$/
 const maxPackageSize = 2 * 1024 ** 3
@@ -36,6 +37,20 @@ type GitHubAsset = { name: string; size: number; url: URL; digest?: string }
 export type PackageAsset = GitHubAsset & { kind: UpdateKind; sha256: string }
 export type Release = { version: string; notes: string; manifest: GitHubAsset | null; packages: Map<string, GitHubAsset> }
 export type UpdateRequest = (url: URL, init: RequestInit) => Promise<Response>
+
+export class UpdateConnectionError extends Error {
+  constructor(readonly status: UpdateConnectionStatus, message: string, options?: ErrorOptions) {
+    super(message, options)
+  }
+}
+
+export async function openOfficialReleasePage(open: (url: string) => Promise<void>) {
+  try {
+    await open(officialLatestReleaseUrl)
+  } catch (cause) {
+    throw new Error('无法打开官方发布页', { cause })
+  }
+}
 
 function versionOrder(left: string, right: string) {
   const [major, minor, patch] = left.split('.').map(Number)
@@ -71,13 +86,20 @@ async function get(request: UpdateRequest, url: URL, signal: AbortSignal, asset?
         headers: { 'User-Agent': 'Manju-Workbench', Accept: asset ? 'application/octet-stream' : 'application/vnd.github+json' },
       })
     } catch (cause) {
-      throw new Error('更新网络连接失败，请检查网络后重试', { cause })
+      throw new UpdateConnectionError('offline', '更新网络连接失败，请检查网络后重试', { cause })
     }
     if (response.redirected || response.url !== url.href) {
       await response.body?.cancel().catch(() => {})
       throw new Error('更新响应来自未经校验的地址')
     }
     if (response.status === 200) return response
+    if (!asset && (response.status === 403 || response.status === 429)) {
+      const message = await readJson(response, maxManifestSize, 'GitHub 错误响应')
+        .then(value => z.object({ message: z.string() }).parse(value).message).catch(() => '')
+      const limited = response.status === 429 || response.headers.get('x-ratelimit-remaining') === '0'
+        || response.headers.has('retry-after') || /\brate limit\b/i.test(message)
+      throw new UpdateConnectionError(limited ? 'rate-limited' : 'forbidden', `GitHub 更新请求失败（HTTP ${response.status}）`)
+    }
     await response.body?.cancel().catch(() => {})
     if (asset && [301, 302, 303, 307, 308].includes(response.status)) {
       const location = response.headers.get('location')
@@ -99,7 +121,7 @@ export async function* responseBytes(response: Response, maxBytes: number, sizeE
   try {
     for (;;) {
       const chunk = await reader.read().catch(cause => {
-        throw new Error('更新网络连接中断，请重试', { cause })
+        throw new UpdateConnectionError('offline', '更新网络连接中断，请重试', { cause })
       })
       if (chunk.done) return
       size += chunk.value.byteLength

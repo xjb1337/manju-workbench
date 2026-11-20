@@ -3,14 +3,16 @@ import { createReadStream } from 'node:fs'
 import { copyFile, link, lstat, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { availableParallelism, tmpdir } from 'node:os'
 import path from 'node:path'
-import { shotMedia, shotVisual, folderNameSchema, totalFrames, type Episode, type Shot } from '../shared/model'
-import { frameSpec, shotMethod, usesFinishedVideo, type FrameSpec, type ShotMethod } from '../shared/creative'
+import { Readable } from 'node:stream'
+import { audibleMusic, shotMedia, shotVisual, folderNameSchema, totalFrames, visualMotion, type Episode, type Shot, type ShotMotion } from '../shared/model'
+import { frameSpec, shotMethod, usesFinishedVideo, type FrameSpec } from '../shared/creative'
 import type { Project } from '../shared/model'
-import { mediaInput, probe, runTool } from './process'
-import { checkedFile, type ProjectStore } from './storage'
+import { ffmpegTools, mediaInput, probe, runTool } from './process'
+import { checkedFile, fileFingerprint, type ProjectStore } from './storage'
 
 const fps = 30
 const sampleRate = 48_000
+const stereoSampleBytes = 4
 const cjkUnit = 100
 const asciiUnit = 55
 const shotCacheVersion = 'shot-cache-v3'
@@ -195,40 +197,37 @@ async function renameWithRetry(from: string, to: string) {
   }
 }
 
-type ShotInputs = {
-  method: ShotMethod
-  visual: ReturnType<typeof shotVisual>
-  voice: ReturnType<typeof shotMedia>
+export function shotSources(project: Project, shot: Shot) {
+  const method = shotMethod(project, shot)
+  const visual = shotVisual(shot, method)
+  const voice = shotMedia(shot, 'audio', method)
+  const checkVideoAudio = !voice && !shot.omittedMedia?.audio && visual?.kind === 'video' && usesFinishedVideo(method)
+  return { method, visual, voice, checkVideoAudio }
+}
+
+type ShotInputs = ReturnType<typeof shotSources> & {
   embeddedAudio: boolean
   visualPath?: string
   voicePath?: string
 }
 
-/** Resolves shot media tracks, validates source files on disk, and probes legacy video audio once. */
+/** Resolves the rendered tracks, including the actual audio stream of a finished video. */
 async function resolveShotInputs(store: ProjectStore, project: Project, shot: Shot, signal: AbortSignal): Promise<ShotInputs> {
-  const method = shotMethod(project, shot)
-  const visual = shotVisual(shot, method)
-  const video = visual?.kind === 'video' ? visual.version : undefined
-  const voice = shotMedia(shot, 'audio', method)
+  const sources = shotSources(project, shot)
+  const { visual, voice, checkVideoAudio } = sources
   const visualPath = visual && await store.assetPath(visual.version)
   const voicePath = voice && await store.assetPath(voice)
-  let embeddedAudio = false
-  // Probe earlier manifests that predate the embedded-audio marker.
-  if (!voice && !shot.omittedMedia?.audio && video && usesFinishedVideo(method)) {
-    if (video.hasAudio !== undefined) {
-      embeddedAudio = video.hasAudio
-    } else {
-      embeddedAudio = (await probe(visualPath!, video.extension, signal)).streams.some(stream => stream.codec_type === 'audio')
-    }
-  }
-  return { method, visual, voice, embeddedAudio, visualPath, voicePath }
+  const embeddedAudio = !!(checkVideoAudio && visual && visualPath
+    && (await probe(visualPath, visual.version.extension, signal)).streams.some(stream => stream.codec_type === 'audio'))
+  return { ...sources, embeddedAudio, visualPath, voicePath }
 }
 
 /** Computes a deterministic SHA-256 key covering all inputs that affect a shot's rendered output. */
-async function shotCacheKey(spec: FrameSpec, shot: Shot, inputs: ShotInputs, signal: AbortSignal) {
+async function shotCacheKey(spec: FrameSpec, shot: Shot, inputs: ShotInputs, duckTrack: boolean, signal: AbortSignal) {
   const { method, visual, voice, embeddedAudio, visualPath, voicePath } = inputs
   const visualHash = visualPath && await fileFingerprint(visualPath, signal)
   const voiceHash = voicePath && await fileFingerprint(voicePath, signal)
+  const motion = visualMotion(shot, visual?.kind)
   return createHash('sha256').update(JSON.stringify({
     version: shotCacheVersion,
     spec: {
@@ -256,14 +255,9 @@ async function shotCacheKey(spec: FrameSpec, shot: Shot, inputs: ShotInputs, sig
       hash: voiceHash,
     } : null,
     embeddedAudio,
+    ...(duckTrack && { duckTrack: 'stereo' }),
+    ...(motion !== 'off' && { motion }),
   })).digest('hex')
-}
-
-async function fileFingerprint(file: string, signal: AbortSignal) {
-  const hash = createHash('sha256')
-  for await (const chunk of createReadStream(file, { signal })) hash.update(chunk)
-  signal.throwIfAborted()
-  return hash.digest('hex')
 }
 
 async function linkOrCopy(source: string, target: string) {
@@ -305,6 +299,19 @@ async function writeShotCache(workFile: string, cacheDir: string, hash: string, 
   }
 }
 
+function motionFilters(motion: Exclude<ShotMotion, 'off'>, frames: number, width: number, height: number) {
+  const progress = `(1-cos(PI*on/${Math.max(1, frames - 1)}))/2`
+  const zoom = { 'zoom-in': `1+0.18*${progress}`, 'zoom-out': `1.18-0.18*${progress}`, pan: '1.18' }[motion]
+  const x = `(iw-iw/zoom)*${motion === 'pan' ? progress : '0.5'}`
+  return [
+    'trim=end_frame=1',
+    `crop=w='max(1,min(iw,ih*${width}/${height}/sar))':h='max(1,min(ih,iw*${height}/${width}*sar))':exact=1`,
+    // Oversampling the still and retaining full chroma let zoompan move in smaller steps.
+    `scale=${width * 3}:${height * 3}:flags=bicubic`, 'setsar=1', 'format=yuv444p',
+    `zoompan=z='${zoom}':x='${x}':y='(ih-ih/zoom)*0.5':d=${frames}:s=${width}x${height}:fps=${fps}`,
+  ]
+}
+
 async function encodeShot(
   store: ProjectStore,
   shot: Shot,
@@ -313,6 +320,7 @@ async function encodeShot(
   cwd: string,
   spec: FrameSpec,
   inputs: ShotInputs,
+  duckTrack: boolean,
   signal: AbortSignal,
   onProgress?: (ratio: number) => void,
 ) {
@@ -327,24 +335,34 @@ async function encodeShot(
   const captionFile = `caption-${index}.ass`
   const caption = !!shot.dialogue.trim()
   if (caption) await writeFile(path.join(cwd, captionFile), subtitles(shot, spec), 'utf8')
-  const videoFilter = [
-    'setpts=PTS-STARTPTS',
+  const motion = visualMotion(shot, visual?.kind)
+  const pictureFilters = motion === 'off' ? [
     `fps=${fps}:eof_action=pass`,
     `scale=w='max(2,trunc(min(${width},${height}*dar)/2)*2)':h='max(2,trunc(min(${height},${width}/dar)/2)*2)'`,
     'setsar=1',
     `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`,
     ...(visual ? ['tpad=stop_mode=clone:stop=-1'] : []),
+  ] : motionFilters(motion, shot.frames, width, height)
+  const videoFilter = [
+    'setpts=PTS-STARTPTS',
+    ...pictureFilters,
     `trim=end_frame=${shot.frames}`,
     ...(caption ? [`subtitles=${captionFile}`] : []),
   ].join(',')
   const audioFilter = `aresample=${sampleRate}:first_pts=0,asetpts=N/SR/TB,apad,atrim=end_sample=${shot.frames * (sampleRate / fps)}`
+  const audioInput = embeddedAudio ? '0:a:0' : '1:a:0'
+  // Only independently imported narration controls the gain. Picture sound stays in the dry mix.
+  const audioOutput = duckTrack ? [
+    '-filter_complex', `[${audioInput}]${audioFilter},asplit[dry][detector];[detector]aformat=channel_layouts=stereo${voice ? '' : ',volume=0'}[duck]`,
+    '-map', '[dry]', '-map', '[duck]',
+  ] : ['-map', audioInput, '-af', audioFilter]
   const totalUs = (shot.frames / fps) * 1_000_000
   await runTool('ffmpeg', [
     '-nostdin', '-v', 'error', '-xerror', '-progress', 'pipe:1', '-filter_threads', '2', ...visualArgs, ...audioArgs,
-    '-map', '0:V:0', '-map', embeddedAudio ? '0:a:0' : '1:a:0', '-vf', videoFilter, '-af', audioFilter,
+    '-map', '0:V:0', '-vf', videoFilter, ...audioOutput,
     '-c:v', 'libx264', '-threads:v', '3', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
     '-bf', '0', '-video_track_timescale', '30000', '-color_range', 'tv', '-colorspace', 'bt709',
-    '-c:a', 'pcm_s16le', '-ar', String(sampleRate), '-ac', '2', '-map_metadata', '-1', '-map_chapters', '-1',
+    '-c:a', 'pcm_s16le', '-ar', String(sampleRate), '-ac:a:0', '2', '-map_metadata', '-1', '-map_chapters', '-1',
     '-f', 'mov', file,
   ], {
     cwd,
@@ -391,22 +409,108 @@ export async function writeEpisodeSrt(destination: string, episode: Episode, spe
   }
 }
 
+async function* repeatMusic(file: string, size: number, remaining: number, signal: AbortSignal) {
+  const blockSize = 64 * 1024
+  if (size < blockSize) {
+    // Fill whole repetitions so even a very short soundtrack stays aligned to sample boundaries.
+    const loop = await readFile(file, { signal })
+    const block = Buffer.alloc(Math.floor(blockSize / size) * size, loop)
+    for (; remaining > 0; remaining -= block.length) {
+      signal.throwIfAborted()
+      yield block.subarray(0, Math.min(remaining, block.length))
+    }
+    return
+  }
+  for (; remaining > 0; remaining -= size) {
+    yield* createReadStream(file, { end: Math.min(remaining, size) - 1, highWaterMark: blockSize, signal })
+  }
+}
+
+async function readSamples(file: Awaited<ReturnType<typeof open>>, buffer: Buffer, length: number, position: number) {
+  for (let offset = 0; offset < length;) {
+    const { bytesRead } = await file.read(buffer, offset, length - offset, position + offset)
+    if (!bytesRead) throw new Error('镜头音轨时长校验失败')
+    offset += bytesRead
+  }
+}
+
+async function* mixedTracks(
+  workDir: string, musicFile: string, musicSize: number, music: NonNullable<Episode['music']>, samples: number, signal: AbortSignal,
+) {
+  await using dry = await open(path.join(workDir, 'dry.pcm'), 'r')
+  await using voice = await open(path.join(workDir, 'voice.pcm'), 'r')
+  const attack = 1 - Math.exp(-1 / (0.015 * sampleRate))
+  const release = 1 - Math.exp(-1 / (0.25 * sampleRate))
+  const fadeIn = Math.round(music.fadeIn * sampleRate)
+  const fadeOut = Math.round(music.fadeOut * sampleRate)
+  const threshold = 0.009
+  let envelope = 0
+  let position = 0
+  const dryBlock = Buffer.alloc(64 * 1024)
+  const voiceBlock = Buffer.alloc(dryBlock.length)
+  for await (const musicBlock of repeatMusic(musicFile, musicSize, samples * stereoSampleBytes, signal)) {
+    signal.throwIfAborted()
+    await Promise.all([
+      readSamples(dry, dryBlock, musicBlock.length, position),
+      readSamples(voice, voiceBlock, musicBlock.length, position),
+    ])
+    const mixed = Buffer.alloc(musicBlock.length)
+    for (let offset = 0; offset < musicBlock.length; offset += stereoSampleBytes) {
+      const sample = (position + offset) / stereoSampleBytes
+      const peak = Math.max(Math.abs(voiceBlock.readInt16LE(offset)), Math.abs(voiceBlock.readInt16LE(offset + 2))) / 32768
+      envelope += (peak - envelope) * (peak > envelope ? attack : release)
+      const duck = envelope > threshold ? Math.pow(threshold / envelope, 11 / 12) : 1
+      const fade = Math.min(1, fadeIn ? sample / fadeIn : 1, fadeOut ? (samples - sample) / fadeOut : 1)
+      const gain = music.volume * duck * fade
+      const left = dryBlock.readInt16LE(offset) + musicBlock.readInt16LE(offset) * gain
+      const right = dryBlock.readInt16LE(offset + 2) + musicBlock.readInt16LE(offset + 2) * gain
+      const limit = Math.max(1, Math.abs(left) / 32767, Math.abs(right) / 32767)
+      mixed.writeInt16LE(Math.round(left / limit), offset)
+      mixed.writeInt16LE(Math.round(right / limit), offset + 2)
+    }
+    position += musicBlock.length
+    yield mixed
+  }
+}
+
 export async function renderEpisode(
   store: ProjectStore,
   episode: Episode,
   destination: string,
-  options: { signal: AbortSignal; progress?: (percent: number) => void; publish?: () => void; project?: Project; cacheDir?: string },
+  options: {
+    signal: AbortSignal; progress?: (percent: number) => void; beforePublish?: () => Promise<void>
+    publish?: () => void; project?: Project; cacheDir?: string
+  },
 ) {
   const project = options.project ?? store.snapshot
   const spec = frameSpec(project)
   const { width, height } = spec
   if (!episode.shots.length) throw new Error('请先新建镜头')
+  await ffmpegTools.requireReady()
   let workDir: string | undefined
   let publishDir: string | undefined
   try {
     workDir = await mkdtemp(path.join(tmpdir(), 'manju-render-work-'))
     publishDir = await mkdtemp(path.join(path.dirname(destination), '.manju-render-'))
     const total = totalFrames(episode)
+    const totalSamples = total * (sampleRate / fps)
+    const music = audibleMusic(episode)
+    const musicPath = music && await store.assetPath(music.version)
+    const musicHash = musicPath && await fileFingerprint(musicPath, options.signal)
+    let soundtrack: { file: string; size: number } | undefined
+    if (musicPath) {
+      // Decode one pass. Feed exactly the requested samples so container and demuxer loop timestamps cannot interrupt the mix.
+      const normalizedMusic = path.join(workDir, 'music.pcm')
+      await runTool('ffmpeg', [
+        '-nostdin', '-v', 'error', '-xerror', '-abort_on', 'empty_output_stream',
+        ...mediaInput(musicPath, music.version.extension), '-map', '0:a:0',
+        '-af', `aresample=${sampleRate}:first_pts=0,asetpts=N/SR/TB,atrim=end_sample=${totalSamples}`,
+        '-c:a', 'pcm_s16le', '-ac', '2', '-ar', String(sampleRate), '-f', 's16le', normalizedMusic,
+      ], { signal: options.signal })
+      const { size } = await checkedFile(normalizedMusic)
+      if (!size || size % stereoSampleBytes) throw new Error('背景音乐解码失败')
+      soundtrack = { file: normalizedMusic, size }
+    }
     const files = episode.shots.map((_, i) => `shot-${i}.mov`)
     const shotProgress = new Array<number>(episode.shots.length).fill(0)
     const batchController = new AbortController()
@@ -434,9 +538,9 @@ export async function renderEpisode(
           batchSignal.throwIfAborted()
           const inputs = await resolveShotInputs(store, project, shot, batchSignal)
           const cacheDir = options.cacheDir
-          const hash = cacheDir && await shotCacheKey(spec, shot, inputs, batchSignal)
+          const hash = cacheDir && await shotCacheKey(spec, shot, inputs, !!music, batchSignal)
           const workFile = path.join(workDir!, files[i])
-          const encode = () => encodeShot(store, shot, i, files[i], workDir!, spec, inputs, batchSignal, ratio => {
+          const encode = () => encodeShot(store, shot, i, files[i], workDir!, spec, inputs, !!music, batchSignal, ratio => {
             shotProgress[i] = Math.max(shotProgress[i], ratio)
             reportProgress()
           })
@@ -445,7 +549,7 @@ export async function renderEpisode(
             const useOrFill = async () => {
               if (await tryUseShotCache(path.join(cacheDir, hash), workFile, batchSignal)) return
               await encode()
-              const afterEncode = await shotCacheKey(spec, shot, inputs, batchSignal).catch(() => undefined)
+              const afterEncode = await shotCacheKey(spec, shot, inputs, !!music, batchSignal).catch(() => undefined)
               if (afterEncode === hash) await writeShotCache(workFile, cacheDir, hash, batchSignal)
             }
             const fill = useOrFill()
@@ -480,27 +584,43 @@ export async function renderEpisode(
       `duration ${seconds(shot.frames)}`,
     ])]
     await writeFile(path.join(workDir, 'episode.ffconcat'), manifest.join('\n') + '\n')
+    const timelineInput = ['-protocol_whitelist', 'file,pipe', '-f', 'concat', '-safe', '1', '-i', 'episode.ffconcat']
+    let musicInput: Readable | undefined
+    if (music && soundtrack) {
+      // Read the two shot tracks independently. Both contain exactly one block per picture frame.
+      const tracks = ['0:a:0', '0:a:1'].flatMap((track, index) => [
+        '-map', track, '-c:a', 'pcm_s16le', '-f', 's16le', index ? 'voice.pcm' : 'dry.pcm',
+      ])
+      await runTool('ffmpeg', ['-nostdin', '-v', 'error', '-xerror', ...timelineInput, ...tracks], {
+        cwd: workDir, signal: options.signal,
+      })
+      musicInput = Readable.from(mixedTracks(workDir, soundtrack.file, soundtrack.size, music, totalSamples, options.signal))
+    }
     const complete = path.join(publishDir, 'complete.mp4')
     await runTool('ffmpeg', [
-      '-nostdin', '-v', 'error', '-xerror', '-protocol_whitelist', 'file,pipe',
-      '-f', 'concat', '-safe', '1', '-i', 'episode.ffconcat',
-      '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+      '-nostdin', '-v', 'error', '-xerror', ...timelineInput,
+      ...(musicInput ? ['-protocol_whitelist', 'pipe', '-f', 's16le', '-ar', String(sampleRate), '-ac', '2', '-i', 'pipe:0'] : []),
+      '-map', '0:v:0', '-map', musicInput ? '1:a:0' : '0:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
       '-map_metadata', '-1', '-map_chapters', '-1', '-movflags', '+faststart', '-f', 'mp4', complete,
-    ], { cwd: workDir, signal: options.signal })
+    ], { cwd: workDir, signal: options.signal, input: musicInput })
     const info = await probe(complete, 'mp4', options.signal)
     const video = info.streams.find(stream => stream.codec_type === 'video')
     const audio = info.streams.find(stream => stream.codec_type === 'audio')
     if (video?.codec_name !== 'h264' || video.width !== width || video.height !== height
-      || audio?.codec_name !== 'aac' || Math.abs(Number(info.format.duration ?? 0) - total / fps) > 0.10) {
+      || audio?.codec_name !== 'aac' || Math.abs(Number(info.format.duration ?? 0) - total / fps) > 0.10
+      || (music && (Number(video.nb_frames) !== total || Math.abs((Number(audio.duration) || 0) - total / fps) > 0.004))) {
       throw new Error('成片的音视频轨或时长校验失败')
     }
     await checkedFile(complete)
+    if (musicPath && await fileFingerprint(musicPath, options.signal) !== musicHash) throw new Error('渲染期间背景音乐文件已变化')
     const handle = await open(complete, 'r+')
     try { await handle.sync() } finally { await handle.close() }
+    await options.beforePublish?.()
     options.signal.throwIfAborted()
     options.publish?.()
     await renameWithRetry(complete, destination)
     options.progress?.(100)
+    return { musicHash }
   } finally {
     if (workDir) await rm(workDir, { recursive: true, force: true }).catch(() => {})
     if (publishDir) await rm(publishDir, { recursive: true, force: true }).catch(() => {})

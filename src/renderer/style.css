@@ -261,10 +261,19 @@ dialog:has(.episode-player[data-ratio="9:16"]) { width: min(475px, calc(100vw - 
 .sample-actions { display: flex; gap: 4px; }
 .export-size { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .render-spec { margin-bottom: 10px; color: var(--muted); }
-.export-fallbacks { list-style: none; padding: 0; margin: 12px 0 0; max-height: min(250px, 40vh); overflow: auto; }
-.export-fallbacks li { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line); }
-.export-fallbacks li span { overflow-wrap: anywhere; }
-.export-fallbacks li strong { flex: none; }
+dialog:has(.preflight) { width: min(580px, calc(100vw - 42px)); }
+.preflight { display: grid; gap: 12px; max-height: 55vh; overflow: auto; padding: 1px 4px; }
+.preflight h3 { overflow-wrap: anywhere; }
+.preflight h4 { margin: 0; padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; }
+.preflight h4 span { font-variant-numeric: tabular-nums; margin-left: 4px; }
+.preflight [data-severity="error"] h4 { color: var(--danger); background: var(--danger-bg); }
+.preflight [data-severity="warning"] h4 { color: var(--warn); background: var(--warn-bg); }
+.preflight ul { list-style: none; padding: 0; margin: 2px 0 0; }
+.preflight li { border-bottom: 1px solid var(--line); }
+.preflight li button { width: 100%; justify-content: space-between; text-align: left; white-space: normal; }
+.preflight li span { overflow-wrap: anywhere; }
+.preflight li strong { max-width: 52%; text-align: right; }
+.preflight-pass { color: var(--ok); }
 .recent-projects { text-align: left; align-self: stretch; min-width: 0; border-top: 1px solid var(--line); padding-top: 12px; }
 .recent-projects h2 { font-size: 14px; margin-bottom: 8px; }
 .recent-projects ul { display: grid; gap: 4px; max-height: 190px; overflow: auto; padding: 3px; margin: 0; list-style: none; }
@@ -402,3 +411,18 @@ dialog:has(.creative-dialog) { width: min(855px, calc(100vw - 42px)); max-height
     background: transparent;
   }
 }
+
+dialog:has(.music-actions) { width: min(520px, calc(100vw - 42px)); }
+.music-name { overflow-wrap: anywhere; }
+.music-toggle { display: flex; align-items: center; gap: 6px; margin: 10px 0; }
+.music-toggle input { flex: none; width: 16px; height: 16px; margin: 0; padding: 0; }
+.music-actions { flex-wrap: wrap; }
+
+dialog:has(.ffmpeg-content) { width: min(520px, calc(100vw - 42px)); }
+.ffmpeg-content { display: grid; gap: 8px; }
+.ffmpeg-directory { color: var(--muted); overflow-wrap: anywhere; }
+.ffmpeg-content ul { list-style: none; display: grid; gap: 6px; padding: 0; margin: 0; }
+.ffmpeg-content li { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr) auto; align-items: start; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; }
+.ffmpeg-content li span:first-of-type { overflow-wrap: anywhere; }
+.ffmpeg-content li span[data-status] { color: var(--warn); }
+.ffmpeg-content li span[data-status="ready"] { color: var(--ok); }

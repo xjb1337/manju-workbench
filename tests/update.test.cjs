@@ -1,10 +1,12 @@
 const assert = require('node:assert/strict')
+const { createRequire } = require('node:module')
 const { mkdtemp, readFile, readdir, rm, writeFile } = require('node:fs/promises')
 const { tmpdir } = require('node:os')
 const path = require('node:path')
 const { test } = require('node:test')
 const { Updater } = require('../dist/main/updater')
 const { resolveUpdateTarget, setupLaunchOptions } = require('../dist/main/update-system')
+const { openOfficialReleasePage } = require('../dist/main/update-release')
 const { releasesPath, notes, futureVersion, sha256, executableFixture, releaseFixture, loopbackRequest, atUrl, startUpdateFixture } = require('./update-fixture.cjs')
 
 const version = require('../package.json').version
@@ -131,11 +133,104 @@ test('生产校验始终执行，校验错误不发布文件、不改变当前�
   }
 })
 
-test('离线时显示明确网络错误，HTTP 错误和暂无发布有区别', async t => {
+test('离线、普通 HTTP 403、主限流和次级限流各自明确，备用路径不保留更新资格', async t => {
   const { updater } = await service(t, { request: async () => { throw new TypeError('fetch failed') } })
-  await assert.rejects(updater.check(), /网络连接失败/)
-  const blocked = await service(t, { request: async () => new Response(null, { status: 403 }) })
-  await assert.rejects(blocked.updater.check(), /HTTP 403/)
+  assert.deepEqual(await updater.check(), { currentVersion: version, status: 'offline' })
+  for (const [status, makeResponse] of [
+    ['forbidden', () => new Response(null, { status: 403 })],
+    ['rate-limited', () => new Response(null, { status: 403, headers: { 'x-ratelimit-remaining': '0' } })],
+    ['rate-limited', () => Response.json({ message: 'You have exceeded a secondary rate limit.' }, { status: 403 })],
+    ['rate-limited', () => new Response(null, { status: 429 })],
+  ]) {
+    const fixture = releaseFixture()
+    let fail = false
+    const { updater, launched, urls, temp } = await service(t, { request: async url => {
+      if (url.pathname === releasesPath) return fail ? makeResponse() : Response.json([fixture.release])
+      return new Response(fixture.paths[url.pathname])
+    } })
+    assert.equal((await updater.check()).status, 'available')
+    assert.equal((await updater.download(() => {})).status, 'ready')
+    fail = true
+    assert.deepEqual(await updater.check(), { currentVersion: version, status })
+    assert.throws(() => updater.download(() => {}), /没有可下载/)
+    await assert.rejects(updater.install(async () => true), /没有已校验/)
+    assert.deepEqual(launched, [])
+    assert.deepEqual(await readdir(temp), [])
+    assert.equal(urls.length, 4)
+  }
+  const opened = []
+  await openOfficialReleasePage(async url => { opened.push(url) })
+  assert.deepEqual(opened, ['https://github.com/xjb1337/manju-workbench/releases/latest'])
+  await assert.rejects(openOfficialReleasePage(async () => { throw new Error('no default handler') }), /无法打开官方发布页/)
+})
+
+function checkWorkflowContexts(value, location = '') {
+  if (value && typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) {
+      checkWorkflowContexts(child, location ? `${location}.${key}` : key)
+    }
+  }
+  if (typeof value !== 'string') return
+
+  // https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#available-contexts
+  const step = /^jobs\.[^.]+\.steps\.\d+\.(?:continue-on-error|if|name|run|timeout-minutes|working-directory|(?:env|with)\.[^.]+)$/.test(location)
+  const output = /^jobs\.[^.]+\.(?:environment\.url|outputs\.[^.]+)$/.test(location)
+  const containerEnv = /^jobs\.[^.]+\.(?:container|services\.[^.]+)\.env\.[^.]+$/.test(location)
+  const available = {
+    runner: step || output || containerEnv,
+    job: step || output || containerEnv,
+    steps: step || output,
+    jobs: /^on\.workflow_call\.outputs\.[^.]+\.value$/.test(location),
+    env: !/^jobs\.[^.]+\.env\./.test(location),
+  }
+  const expressions = Array.from(value.matchAll(/\$\{\{((?:'(?:[^']|'')*'|[^'}]|\}(?!\}))*?)\}\}/g), match => match[1])
+  if (!expressions.length && /^jobs\.[^.]+\.(?:steps\.\d+\.)?if$/.test(location)) expressions.push(value)
+  for (const expression of expressions) {
+    // Skip string literals and property names, such as github.event.job.
+    for (const [, name] of expression.matchAll(/'(?:[^']|'')*'|\.\s*[a-z_][\w-]*|([a-z_][\w-]*)/gi)) {
+      const context = name?.toLowerCase()
+      if (Object.hasOwn(available, context)) assert.ok(available[context], `${location} 不允许使用 ${context} 上下文`)
+    }
+  }
+}
+
+test('Windows workflow 仅手动打包且只上传四个精确命名的 Actions 附件', async () => {
+  // Use the YAML parser already locked by the packaging tool.
+  const { load } = createRequire(require.resolve('app-builder-lib/package.json'))('js-yaml')
+  const root = path.join(__dirname, '..')
+  const yaml = load(await readFile(path.join(root, '.github/workflows/package-windows.yml'), 'utf8'))
+  checkWorkflowContexts(yaml)
+  assert.deepEqual(yaml.on, { workflow_dispatch: null })
+  assert.deepEqual(yaml.permissions, { contents: 'read' })
+  assert.deepEqual(Object.keys(yaml.jobs), ['package'])
+  const job = yaml.jobs.package
+  assert.equal(job['runs-on'], 'windows-latest')
+  assert.equal(job.env.CSC_IDENTITY_AUTO_DISCOVERY, 'false')
+  assert.equal(job.permissions, undefined)
+  assert.deepEqual(job.steps.flatMap(step => step.uses ? [step.uses.split('@')[0]] : []),
+    ['actions/checkout', 'actions/setup-node', 'actions/upload-artifact'])
+  assert.equal(job.steps[0].with['persist-credentials'], false)
+  const portable = job.steps.find(step => step.run === 'npx.cmd --no-install electron-builder --win portable --x64 --publish never')
+  const setup = job.steps.find(step => step.id === 'packages')
+  const cache = '${{ runner.temp }}/manju-builder-cache'
+  assert.equal(portable?.env?.ELECTRON_BUILDER_CACHE, cache)
+  assert.equal(setup?.env?.ELECTRON_BUILDER_CACHE, cache)
+  const packages = setup.run
+  assert.match(packages, /Get-ChildItem -LiteralPath \$env:ELECTRON_BUILDER_CACHE -Filter makensis\.exe/)
+  assert.match(packages, /\$compilers\.Count -ne 1/)
+  assert.match(packages, /Get-Content package\.json -Raw/)
+  assert.match(packages, /node scripts\/pack-native\.cjs \$compiler release\/win-unpacked \$setup/)
+  assert.match(packages, /node scripts\/write-update-manifest\.cjs --sha256 \$setup \$portable/)
+  const upload = job.steps.at(-1).with
+  const output = 'Manju-Workbench-${{ steps.packages.outputs.version }}'
+  const suffixes = ['x64-Setup.exe', 'x64-Portable.exe', 'win-x64.manifest.json', 'win-x64.sha256.txt']
+  assert.equal(upload['if-no-files-found'], 'error')
+  assert.deepEqual(upload.path.trim().split('\n'), suffixes.map(suffix => `release/${output}-${suffix}`))
+  for (const suffix of suffixes) assert.ok(packages.includes(`"release/$prefix-${suffix}"`))
+  const { build } = require('../package.json')
+  assert.equal(build.win.signExecutable, false)
+  assert.equal(build.portable.artifactName.replace('${version}', version).replace('${arch}', 'x64').replace('${ext}', 'exe'),
+    `Manju-Workbench-${version}-${suffixes[1]}`)
 })
 
 test('拒绝未授权重定向、跳到同主机其他仓库和运输层自动跟随', async t => {

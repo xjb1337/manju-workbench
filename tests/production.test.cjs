@@ -9,7 +9,7 @@ const {
   detailGenerationKind, detailKindSchema, externalDetailKey, generationDetailKind, generationKindSchema, methodSchema,
 } = require('../dist/shared/creative')
 const { externalMethod, magpiePlanSchema, storedMethod } = require('../dist/shared/plan')
-const { productionProgress, productionSteps, exportFallbacks, exportInputsChanged } = require('../dist/shared/production')
+const { productionProgress, productionSteps, exportInputsChanged } = require('../dist/shared/production')
 const { ProjectStore } = require('../dist/main/storage')
 
 const date = '2026-11-18T00:00:00.000Z'
@@ -126,22 +126,6 @@ test('无声成片不算配音就绪，过期成片和原声仍需检查', () =>
   assert.equal(productionProgress(project, first.id).statuses.audio, 'stale')
   entry.omittedMedia = { audio: true }
   assert.equal(productionProgress(project, first.id).statuses.audio, 'complete')
-})
-
-test('导出提醒只列出回退到静态图或黑底的镜头', () => {
-  const project = emptyProject()
-  const first = episode()
-  const expectedVideo = { ...shot(), title: '等待视频' }
-  const stillOnly = { ...shot(), method: 'image' }
-  const activeVideo = { ...shot(), method: 'flow' }
-  first.shots.push({ ...shot(), title: '空镜头' }, expectedVideo, stillOnly, activeVideo)
-  for (const entry of [expectedVideo, stillOnly, activeVideo]) media(entry.media.image, 'jpg')
-  media(activeVideo.media.video, 'mp4')
-  assert.deepEqual(exportFallbacks(project, first), [
-    { index: 0, title: '空镜头', label: '黑底' }, { index: 1, title: '等待视频', label: '静态参考图' },
-  ])
-  expectedVideo.omittedMedia = { video: true }
-  assert.deepEqual(exportFallbacks(project, first).map(item => item.index), [0])
 })
 
 test('成片输入只跟踪镜头顺序、时长、台词、活动素材和实际静默/跳过', () => {

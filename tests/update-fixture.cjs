@@ -58,11 +58,19 @@ function atUrl(response, url) {
 
 async function startUpdateFixture() {
   const transfers = []
-  const state = { releases: [], paths: {}, stalledPath: '', requests: [] }
+  const state = { releases: [], paths: {}, stalledPath: '', requests: [], releaseFailure: '' }
   const server = createServer((req, res) => {
     const { pathname } = new URL(req.url, 'http://localhost')
     state.requests.push(pathname)
-    if (pathname === releasesPath) return res.end(JSON.stringify(state.releases))
+    if (pathname === releasesPath) {
+      if (state.releaseFailure === 'offline') return req.socket.destroy()
+      if (state.releaseFailure) {
+        res.statusCode = 403
+        if (state.releaseFailure === 'rate-limited') res.setHeader('x-ratelimit-remaining', '0')
+        return res.end('{}')
+      }
+      return res.end(JSON.stringify(state.releases))
+    }
     const bytes = state.paths[pathname]
     if (!bytes) { res.statusCode = 404; return res.end() }
     if (pathname === state.stalledPath) {

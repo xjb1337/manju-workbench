@@ -1,5 +1,5 @@
 import { shotMethod, usesFinishedVideo, usesTrack } from './creative'
-import { activeVersion, kinds, shotMedia, shotVisual, type Episode, type MediaKind, type Project, type Shot } from './model'
+import { activeVersion, audibleMusic, kinds, shotMedia, shotVisual, visualMotion, type Episode, type MediaKind, type Project, type Shot } from './model'
 
 export const productionSteps = [
   { id: 'script', label: '剧本' },
@@ -77,25 +77,14 @@ export function productionProgress(project: Project, episodeId?: string) {
   return { steps, statuses, recommended, missingReferences, media, dialogueCount: shots.filter(shot => shot.dialogue.trim()).length }
 }
 
-export function exportFallbacks(project: Pick<Project, 'workType'>, episode: Episode) {
-  return episode.shots.flatMap((shot, index) => {
-    const method = shotMethod(project, shot)
-    const visual = shotVisual(shot, method)
-    if (!visual) return [{ index, title: shot.title, label: '黑底' }]
-    if (visual.kind === 'image' && usesTrack(method, 'video') && !shot.omittedMedia?.video) {
-      return [{ index, title: shot.title, label: '静态参考图' }]
-    }
-    return []
-  })
-}
-
 export function exportInputsChanged(before: Episode, after: Episode, beforeProject: Pick<Project, 'workType'> = {}, afterProject = beforeProject) {
   function inputs(shot: Shot, project: Pick<Project, 'workType'>) {
     const method = shotMethod(project, shot)
     const embeddedAudio = usesFinishedVideo(method) && !shot.omittedMedia?.audio && !shotMedia(shot, 'audio', method)
       ? shotMedia(shot, 'video', method)?.id : undefined
-    return [shot.id, shot.frames, shot.dialogue, embeddedAudio,
+    return [shot.id, shot.frames, shot.dialogue, embeddedAudio, visualMotion(shot, shotVisual(shot, method)?.kind),
       ...kinds.map(kind => [shot.media[kind].activeId, shotMedia(shot, kind, method)?.id])]
   }
-  return JSON.stringify(before.shots.map(shot => inputs(shot, beforeProject))) !== JSON.stringify(after.shots.map(shot => inputs(shot, afterProject)))
+  return JSON.stringify(audibleMusic(before)) !== JSON.stringify(audibleMusic(after))
+    || JSON.stringify(before.shots.map(shot => inputs(shot, beforeProject))) !== JSON.stringify(after.shots.map(shot => inputs(shot, afterProject)))
 }

@@ -3,7 +3,7 @@ import { lstat, mkdtemp, open, rename, rm } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import path from 'node:path'
 import type { UpdateCheck, UpdateDownload, UpdateKind, UpdateProgress } from '../shared/api'
-import { downloadResponse, findRelease, hasPackage, packageFor, responseBytes } from './update-release'
+import { downloadResponse, findRelease, hasPackage, packageFor, responseBytes, UpdateConnectionError } from './update-release'
 import type { PackageAsset, Release, UpdateRequest } from './update-release'
 
 export type SetupUpdateTarget = { kind: 'setup'; directory: string; identity: string }
@@ -129,6 +129,9 @@ export class Updater {
         ...(target.kind === 'manual' && { manual: true as const }),
         ...(target.kind === 'setup' && { directory: target.directory }),
       }
+    } catch (error) {
+      if (error instanceof UpdateConnectionError) return { currentVersion, status: error.status }
+      throw error
     } finally {
       this.#checking = undefined
     }

@@ -1,4 +1,4 @@
-import type { MediaTarget, Mutation, Project } from './model'
+import type { ImportTarget, MediaKind, MediaTarget, Mutation, Project } from './model'
 import type { DetailKind, GenerationKind } from './creative'
 
 import type { AiConnectionTestResult, AiGatewayConfig, AiNetwork, AiRequestTarget, PlanPreview } from './plan'
@@ -15,19 +15,37 @@ export type Reply<T> = { ok: true; value: T } | ReplyError
 export type RecentProject = { id: string; title: string; directory: string; fictional: boolean }
 export type Tool = GenerationKind | 'planning'
 export type RenderProgress = { mode: 'preview' | 'export'; percent: number }
+export type PreflightIssue = {
+  severity: 'error' | 'warning'
+  code: 'no-shots' | 'missing-file' | 'unreadable' | 'missing-visual' | 'black' | 'still'
+    | 'no-voice' | 'dense' | 'subtitle-overflow' | 'stale'
+  target: MediaKind | 'dialogue' | 'music' | 'shots'
+  shot?: { id: string; index: number; title: string }
+}
+export type PreflightReport = { episodeId: string; title: string; issues: PreflightIssue[]; review: string }
 export type RenderResult =
   | { status: 'canceled' }
+  | { status: 'preflight'; report: PreflightReport }
   | { status: 'completed'; mode: 'preview'; location: string }
   | { status: 'completed'; mode: 'export'; location: string; project: Project }
   | { status: 'record-failed'; location: string }
 export type UpdateKind = 'setup' | 'portable'
+export type UpdateConnectionStatus = 'offline' | 'forbidden' | 'rate-limited'
 export type UpdateCheck = { currentVersion: string } & (
   | { status: 'none' }
+  | { status: UpdateConnectionStatus }
   | { status: 'latest'; version: string; notes: string }
   | { status: 'available'; version: string; notes: string; kind: UpdateKind | null; unavailable?: string; manual?: true; directory?: string }
 )
 export type UpdateProgress = { received: number; total: number }
 export type UpdateDownload = { status: 'canceled' } | { status: 'ready'; fileName: string }
+export type FfmpegToolName = 'ffmpeg' | 'ffprobe'
+export type FfmpegToolStatus = {
+  name: FfmpegToolName
+  status: 'ready' | 'missing' | 'outdated' | 'unknown-version' | 'unavailable'
+  version?: string
+}
+export type FfmpegStatus = { directory: string | null; tools: FfmpegToolStatus[] }
 export type OrphanMediaReport = { count: number; bytes: number }
 export type OrphanMediaPreview = OrphanMediaReport & { token: string; files: string[] }
 export interface Workbench {
@@ -54,14 +72,15 @@ export interface Workbench {
   describeAiTarget(baseUrl: string): Promise<Reply<AiNetwork>>
   testAiConnection(config: AiGatewayConfig): Promise<Reply<AiConnectionTestResult>>
   mergePlan(key: string, token: string, replacements: string[]): Promise<Reply<Project>>
-  importMedia(key: string, target: MediaTarget): Promise<Reply<Project | null>>
+  importMedia(key: string, target: ImportTarget): Promise<Reply<Project | null>>
   importDroppedMedia(key: string, target: MediaTarget, file: File): Promise<Reply<Project | null>>
   inspectOrphanMedia(key: string): Promise<Reply<OrphanMediaPreview>>
   cancelOrphanMedia(key: string, token: string): Promise<Reply<null>>
   cleanOrphanMedia(key: string, token: string): Promise<Reply<OrphanMediaReport>>
   copy(text: string): Promise<Reply<null>>
   openTool(key: string, tool: Tool): Promise<Reply<null>>
-  render(key: string, episodeId: string, mode: RenderProgress['mode'], rebuild?: boolean): Promise<Reply<RenderResult>>
+  inspectEpisode(key: string, episodeId: string): Promise<Reply<PreflightReport | null>>
+  render(key: string, episodeId: string, mode: RenderProgress['mode'], rebuild?: boolean, review?: string): Promise<Reply<RenderResult>>
   exportSrt(key: string, episodeId: string): Promise<Reply<string | null>>
   cancelRender(): Promise<Reply<boolean>>
   onProgress(listener: (event: RenderProgress) => void): () => void
@@ -74,4 +93,7 @@ export interface Workbench {
   onUpdateProgress(listener: (event: UpdateProgress) => void): () => void
   setEditorDirty(dirty: boolean): Promise<Reply<null>>
   setTheme(theme: 'light' | 'dark'): Promise<Reply<null>>
+  detectFfmpeg(): Promise<Reply<FfmpegStatus>>
+  chooseFfmpegDirectory(): Promise<Reply<FfmpegStatus | null>>
+  useFfmpegPath(): Promise<Reply<FfmpegStatus>>
 }

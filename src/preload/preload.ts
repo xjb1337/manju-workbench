@@ -48,7 +48,8 @@ const bridge: Workbench = {
   cleanOrphanMedia: (key, token) => ipcRenderer.invoke('media:clean-orphans', key, token),
   copy: text => ipcRenderer.invoke('app:copy', text),
   openTool: (key, tool) => ipcRenderer.invoke('app:open-tool', key, tool),
-  render: (key, episodeId, mode, rebuild) => ipcRenderer.invoke('episode:render', key, episodeId, mode, rebuild),
+  inspectEpisode: (key, episodeId) => ipcRenderer.invoke('episode:preflight', key, episodeId),
+  render: (key, episodeId, mode, rebuild, review) => ipcRenderer.invoke('episode:render', key, episodeId, mode, rebuild, review),
   exportSrt: (key, episodeId) => ipcRenderer.invoke('episode:export-srt', key, episodeId),
   cancelRender: () => ipcRenderer.invoke('episode:cancel'),
   onProgress: listener => {
@@ -69,5 +70,8 @@ const bridge: Workbench = {
   },
   setEditorDirty: dirty => ipcRenderer.invoke('app:editor-dirty', dirty),
   setTheme: theme => ipcRenderer.invoke('app:set-theme', theme),
+  detectFfmpeg: () => ipcRenderer.invoke('ffmpeg:detect'),
+  chooseFfmpegDirectory: () => ipcRenderer.invoke('ffmpeg:choose-directory'),
+  useFfmpegPath: () => ipcRenderer.invoke('ffmpeg:use-path'),
 }
 contextBridge.exposeInMainWorld('workbench', bridge)

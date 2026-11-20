@@ -465,7 +465,31 @@ async function verifyUpdates(folder, project) {
     await screenshot(page, 'update-02-no-release.png')
     await button(panel, '关闭').click()
 
-    Object.assign(server.state, { releases: [fixture.release], paths: fixture.paths, stalledPath: fixture.assetPath })
+    server.state.releases = [releaseFixture({ version }).release]
+    await button(page, '检查更新').click()
+    await panel.getByText('已是最新版本', { exact: true }).waitFor()
+    for (const [failure, status] of [
+      ['offline', '更新网络连接失败'], ['forbidden', 'GitHub 拒绝更新请求（HTTP 403）'], ['rate-limited', 'GitHub 更新检查已限流'],
+    ]) {
+      server.state.releaseFailure = failure
+      await button(panel, '重新检查').click()
+      await panel.getByText(status, { exact: true }).waitFor()
+      await panel.getByText(/手动下载后.*SHA-256/).waitFor()
+      assert.equal(await button(panel, '下载').count(), 0)
+      assert.equal(await button(panel, '安装').count(), 0)
+    }
+    await screenshot(page, 'feature-update-rate-limit.png')
+    await app.evaluate(({ shell }) => {
+      const open = shell.openExternal
+      shell.openExternal = async () => { shell.openExternal = open; throw new Error('虚构系统浏览器打开失败') }
+    })
+    await button(panel, '打开发布页').click()
+    await panel.getByRole('alert').getByText('无法打开官方发布页', { exact: true }).waitFor()
+    await screenshot(page, 'feature-update-fallback-error.png')
+    assert.equal(await panel.getByText(/已通过完整性校验/).count(), 0)
+    await button(panel, '关闭').click()
+
+    Object.assign(server.state, { releases: [fixture.release], paths: fixture.paths, stalledPath: fixture.assetPath, releaseFailure: '' })
     async function checkNewVersion() {
       await button(page, '检查更新').click()
       await panel.getByText(`发现新版本 ${futureVersion}`, { exact: true }).waitFor()
@@ -543,7 +567,7 @@ async function verifyUpdates(folder, project) {
     assert.deepEqual(await app.evaluate(() => globalThis.updateLaunches), [])
     await screenshot(page, 'feature-update-manual-fallback.png')
     await button(panel, '打开发布页').click()
-    assert.deepEqual(await app.evaluate(() => globalThis.openedUrls), ['https://github.com/xjb1337/manju-workbench/releases'])
+    assert.deepEqual(await app.evaluate(() => globalThis.openedUrls), ['https://github.com/xjb1337/manju-workbench/releases/latest'])
     console.log('更新夹具验收通过：无后台检查，暂无发布，发现新版本，纯文本说明，下载取消及校验，安装确认取消，未保存修改保护')
   } catch (error) {
     await desktop?.page.screenshot({ path: path.join(folder, 'diagnostic-update-failure.png'), timeout: 3000 }).catch(() => {})
@@ -924,6 +948,10 @@ async function verifyCreative(folder, parent, profile) {
     await selectStep(page, 'export')
     await choose(app, destination, 'saveChoices')
     await button(guide(page), '导出 MP4').click()
+    const recheck = page.getByRole('dialog', { name: '成片检查', exact: true })
+    await recheck.getByText('视频 · 素材需更新', { exact: true }).first().waitFor()
+    assert.equal(await recheck.getByRole('region', { name: '阻断', exact: true }).count(), 0)
+    await button(recheck, '继续导出').click()
     await page.getByText(/导出完成/).waitFor({ timeout: 45_000 })
     await guideStatus(page, 'export', '已完成')
     console.log('竖屏验收成片', destination, '720 × 1280 / 180 帧')
@@ -1041,6 +1069,25 @@ async function main() {
       return [prefs.sandbox, prefs.contextIsolation, prefs.nodeIntegration, prefs.webSecurity]
     }), [true, true, false, true])
     await screenshot(page, '01-empty-light.png')
+    await button(page, 'FFmpeg 设置').click()
+    const tools = page.getByRole('dialog', { name: 'FFmpeg 设置', exact: true })
+    await tools.getByText('系统 PATH', { exact: true }).waitFor()
+    assert.equal(await tools.getByText('可用', { exact: true }).count(), 2)
+    assert.equal(await tools.getByRole('list', { name: '工具状态' }).getByText(/^n?\d+\.\d+/).count(), 2)
+    await screenshot(page, 'feature-ffmpeg-path.png')
+    const emptyTools = path.join(folder, '空工具 目录')
+    await mkdir(emptyTools)
+    await choose(app, emptyTools)
+    await button(tools, '选择工具目录').click()
+    await tools.getByText(emptyTools, { exact: true }).waitFor()
+    assert.equal(await tools.getByText('未找到', { exact: true }).count(), 2)
+    assert.equal((await documentAt(path.join(profile, 'workbench-preferences.json'))).ffmpegDirectory, emptyTools)
+    await screenshot(page, 'feature-ffmpeg-missing.png')
+    await button(tools, '重新检测').click()
+    await button(tools, '使用 PATH').click()
+    await tools.getByText('系统 PATH', { exact: true }).waitFor()
+    assert.equal(await tools.getByText('可用', { exact: true }).count(), 2)
+    await button(tools, '关闭').click()
     await choose(app, parent)
     await named(page, '创建虚构示例', '雾港来信', '选择保存位置')
     await page.getByText('示例 / 虚构', { exact: true }).waitFor()
@@ -1062,12 +1109,73 @@ async function main() {
     await button(page, '关闭预览').click()
     await guideStatus(page, 'export', '待完成')
     assert.deepEqual(await documentAt(sampleFile), sample)
-    await button(stage(page), '导出 MP4').click()
-    const fallback = page.getByRole('dialog', { name: '确认导出替代画面' })
+    await button(stage(page), '成片检查').click()
+    const fallback = page.getByRole('dialog', { name: '成片检查', exact: true })
     await fallback.waitFor()
-    assert.equal(await fallback.getByText('静态参考图', { exact: true }).count(), 4)
-    await button(fallback, '返回补素材').click()
+    await fallback.getByText('静图回退', { exact: true }).first().waitFor()
+    assert.equal(await fallback.getByText('静图回退', { exact: true }).count(), 4)
+    await screenshot(page, 'feature-preflight-light.png')
+    await button(fallback, '关闭').click()
+    await button(page, '切换深色').click()
+    await button(stage(page), '成片检查').click()
+    await fallback.getByText('静图回退', { exact: true }).first().waitFor()
+    await screenshot(page, 'feature-preflight-dark.png')
+    const unavailable = sample.episodes[0].shots[2].media.image.versions[0]
+    const unavailablePath = path.join(path.dirname(sampleFile), 'media', `${unavailable.id}.${unavailable.extension}`)
+    await rename(unavailablePath, unavailablePath + '.test-backup')
+    try {
+      await button(fallback, '继续导出').click()
+      await fallback.getByRole('region', { name: '阻断', exact: true }).waitFor()
+      assert.equal(await button(fallback, '继续导出').count(), 0)
+      await screenshot(page, 'feature-preflight-blocked.png')
+      await fallback.getByRole('button', { name: /镜头 03.*参考图 · 素材文件不存在/ }).click()
+      await page.waitForFunction(() => document.activeElement?.id === 'shot-import-image')
+      await stage(page).getByText(/镜头 03 · /).waitFor()
+    } finally {
+      await rename(unavailablePath + '.test-backup', unavailablePath)
+    }
+    await button(page, '切换浅色').click()
+    await page.getByRole('button', { name: /^镜头 01 / }).click()
+    await page.locator('.monitor-body img').evaluate(image => image.decode())
     assert.deepEqual(await documentAt(sampleFile), sample)
+    await page.getByLabel('静图运动', { exact: true }).selectOption('zoom-in')
+    await button(page, '保存镜头').click()
+    await footerSaved(page)
+    assert.equal((await documentAt(sampleFile)).episodes[0].shots[0].motion, 'zoom-in')
+    await screenshot(page, 'feature-shot-motion.png')
+    await button(stage(page), '背景音乐').click()
+    const music = page.getByRole('dialog', { name: '背景音乐', exact: true })
+    await choose(app, inputs.files[0].audio)
+    await button(music, '导入背景音乐').click()
+    await music.getByText(path.basename(inputs.files[0].audio), { exact: true }).waitFor()
+    await music.getByLabel('音量（%）').fill('42')
+    await music.getByLabel('淡入（秒）').fill('0.4')
+    await music.getByLabel('淡出（秒）').fill('0.7')
+    await button(music, '保存').click()
+    await page.waitForFunction(() => [...document.querySelectorAll('dialog button')]
+      .some(button => button.textContent === '试听混音' && !button.disabled))
+    assert.equal((await documentAt(sampleFile)).episodes[0].music.volume, 0.42)
+    await screenshot(page, 'feature-episode-music.png')
+    await button(music, '试听混音').click()
+    const mixed = page.locator('video.episode-player')
+    await mixed.waitFor({ timeout: 45_000 })
+    await page.waitForFunction(() => document.querySelector('.episode-player')?.readyState >= 2)
+    assert.ok(Math.abs(await mixed.evaluate(video => video.duration) - 30) < 0.05)
+    const sampleMixedFrame = async time => {
+      await mixed.evaluate(async (video, time) => {
+        video.pause()
+        await new Promise(resolve => { video.addEventListener('seeked', resolve, { once: true }); video.currentTime = time })
+      }, time)
+      return mixed.screenshot({ animations: 'disabled' })
+    }
+    assert.notDeepEqual(await sampleMixedFrame(0.3), await sampleMixedFrame(6.8))
+    await screenshot(page, 'feature-motion-mixed-preview.png')
+    await button(page, '关闭预览').click()
+    await button(stage(page), '背景音乐').click()
+    await music.getByLabel('启用背景音乐').uncheck()
+    await button(music, '保存').click()
+    await button(music, '关闭').click()
+    assert.equal((await documentAt(sampleFile)).episodes[0].music.enabled, false)
     await button(page, '关闭作品').click()
     await page.locator('.welcome-card').waitFor()
     await page.locator('.recent-projects').getByRole('button', { name: /雾港来信/ }).click()
@@ -1322,14 +1430,24 @@ async function main() {
 
     const last = saved.episodes[0].shots.at(-1).media.video.versions[0]
     const missing = path.join(project, 'media', `${last.id}.${last.extension}`)
-    await rename(missing, `${missing}.test-backup`)
+    await choose(app, destination, 'saveChoices')
+    await app.evaluate(({ dialog }, media) => {
+      const original = dialog.showSaveDialog
+      dialog.showSaveDialog = async (...args) => {
+        dialog.showSaveDialog = original
+        const selected = await original(...args)
+        await process.getBuiltinModule('node:fs/promises').rename(media, media + '.test-backup')
+        return selected
+      }
+    }, missing)
     try {
-      await choose(app, destination, 'saveChoices')
       await button(stage(page), '导出 MP4').click()
-      await page.getByRole('alert').filter({ hasText: '镜头 4 · 素材文件不存在' }).waitFor({ timeout: 45_000 })
+      const blocked = page.getByRole('dialog', { name: '成片检查', exact: true })
+      await blocked.getByRole('button', { name: /镜头 04.*视频 · 素材文件不存在/ }).waitFor()
       assert.equal(await hash(destination), sha)
+      await button(blocked, '关闭').click()
     } finally {
-      await rename(`${missing}.test-backup`, missing)
+      await rename(`${missing}.test-backup`, missing).catch(error => { if (error.code !== 'ENOENT') throw error })
     }
     assert.deepEqual((await documentAt(projectFile)).episodes[0].exportRecord, published)
     await guideStatus(page, 'export', '已完成')
@@ -1376,7 +1494,7 @@ async function main() {
     const silent = path.join(project, '静默 成片.mp4')
     await choose(app, silent, 'saveChoices')
     await button(guide(page), '导出 MP4').click()
-    await page.getByRole('dialog', { name: '确认导出替代画面' }).getByText('黑底', { exact: true }).waitFor()
+    await page.getByRole('dialog', { name: '成片检查', exact: true }).getByText('黑底', { exact: true }).waitFor()
     await button(page, '继续导出').click()
     await page.getByText(/导出完成/).waitFor({ timeout: 45_000 })
     await guideStatus(page, 'export', '已完成')

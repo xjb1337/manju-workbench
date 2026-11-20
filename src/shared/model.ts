@@ -38,6 +38,8 @@ const trackSchema = z.object({
 export type Track = z.infer<typeof trackSchema>
 
 export const shotDialogueSchema = z.string().max(1000, '台词最多 1,000 个字符')
+export const motionSchema = z.enum(['off', 'zoom-in', 'zoom-out', 'pan'])
+export type ShotMotion = z.infer<typeof motionSchema>
 export const shotFields = z.object({
   title: titleSchema,
   // Whole 1/30-second frames keep timeline, picture and audio boundaries aligned.
@@ -46,6 +48,7 @@ export const shotFields = z.object({
   prompt: notes,
   videoPrompt: notes.optional(),
   method: methodSchema.optional(),
+  motion: motionSchema.optional(),
   status: z.enum(statuses),
 })
 export type ShotFields = z.infer<typeof shotFields>
@@ -57,9 +60,22 @@ const shotSchema = shotFields.extend({
   legacyPromptReview: z.partialRecord(z.enum(['image', 'flow']), z.literal(true)).optional(),
 })
 export type Shot = z.infer<typeof shotSchema>
+export const musicSettingsSchema = z.object({
+  enabled: z.boolean().default(true),
+  volume: z.number().min(0).max(1).default(0.25),
+  fadeIn: z.number().min(0).max(30).default(0),
+  fadeOut: z.number().min(0).max(30).default(0),
+})
+export type MusicSettings = z.infer<typeof musicSettingsSchema>
+export const defaultMusicSettings = musicSettingsSchema.parse({})
 const episodeSchema = z.object({
   id: idSchema, title: titleSchema, script: notes, shots: z.array(shotSchema).max(500),
-  exportRecord: z.object({ exportedAt: z.iso.datetime(), stale: z.boolean() }).optional(),
+  music: musicSettingsSchema.extend({ version: versionSchema }).optional(),
+  exportRecord: z.object({
+    exportedAt: z.iso.datetime(),
+    stale: z.boolean(),
+    musicHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  }).optional(),
 })
 export type Episode = z.infer<typeof episodeSchema>
 export const categorySchema = z.enum(['characters', 'scenes'])
@@ -96,6 +112,7 @@ export const projectSchema = z.object({
   add(project.id)
   for (const episode of project.episodes) {
     add(episode.id)
+    if (episode.music) checkTrack({ activeId: episode.music.version.id, versions: [episode.music.version] }, 'audio')
     for (const shot of episode.shots) {
       add(shot.id)
       for (const kind of kinds) checkTrack(shot.media[kind], kind)
@@ -119,6 +136,8 @@ export const mediaTargetSchema = z.discriminatedUnion('scope', [
   z.object({ scope: z.literal('reference'), category: categorySchema, referenceId: idSchema }),
 ])
 export type MediaTarget = z.infer<typeof mediaTargetSchema>
+export const importTargetSchema = z.union([mediaTargetSchema, z.object({ scope: z.literal('music'), episodeId: idSchema })])
+export type ImportTarget = z.infer<typeof importTargetSchema>
 export const mutationSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('project.brief'), workType: workTypeSchema, brief: briefSchema }),
   z.object({ type: z.literal('shot.detail'), episodeId: idSchema, shotId: idSchema, kind: detailKindSchema,
@@ -136,6 +155,8 @@ export const mutationSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('episode.add'), title: titleSchema }),
   z.object({ type: z.literal('episode.edit'), episodeId: idSchema, title: titleSchema, script: notes }),
   z.object({ type: z.literal('episode.remove'), episodeId: idSchema }),
+  z.object({ type: z.literal('music.edit'), episodeId: idSchema, settings: musicSettingsSchema }),
+  z.object({ type: z.literal('music.remove'), episodeId: idSchema }),
   z.object({ type: z.literal('shot.add'), episodeId: idSchema, title: titleSchema }),
   z.object({ type: z.literal('shot.duplicate'), episodeId: idSchema, shotId: idSchema }),
   z.object({ type: z.literal('shot.edit'), episodeId: idSchema, shotId: idSchema, fields: shotFields }),
@@ -167,6 +188,14 @@ export function shotVisual(shot: Shot, method: ShotMethod) {
   if (video) return { kind: 'video', version: video } as const
   const image = shotMedia(shot, 'image', method)
   if (image) return { kind: 'image', version: image } as const
+}
+
+export function visualMotion(shot: Pick<Shot, 'motion'>, visualKind: MediaKind | undefined): ShotMotion {
+  return visualKind === 'image' ? shot.motion ?? 'off' : 'off'
+}
+
+export function audibleMusic(episode: Episode) {
+  return episode.music?.enabled && episode.music.volume > 0 ? episode.music : undefined
 }
 
 export function totalFrames(episode: Episode) {
