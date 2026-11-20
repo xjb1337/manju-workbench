@@ -8,7 +8,7 @@ import type { FfmpegStatus, FfmpegToolName, FfmpegToolStatus } from '../shared/a
 
 type ToolOptions = { cwd?: string; signal?: AbortSignal; input?: Readable; onStdoutLine?: (line: string) => void }
 
-function runExecutable(
+export function runExecutable(
   executable: string,
   command: FfmpegToolName,
   args: string[],
@@ -24,8 +24,9 @@ function runExecutable(
     let stderr = ''
     let lineBuffer = ''
     let startError: Error | undefined
+    let inputDone: Promise<void> | undefined
     if (options.input && child.stdin) {
-      void pipeline(options.input, child.stdin, { signal: options.signal }).catch((error: NodeJS.ErrnoException) => {
+      inputDone = pipeline(options.input, child.stdin, { signal: options.signal }).catch((error: NodeJS.ErrnoException) => {
         if (options.signal?.aborted || error.code === 'EPIPE' || error.code === 'ERR_STREAM_PREMATURE_CLOSE') return
         startError ??= error
         child.kill()
@@ -55,7 +56,8 @@ function runExecutable(
     child.on('error', (error: NodeJS.ErrnoException) => {
       startError = error.code === 'ENOENT' ? new Error(`找不到 ${command}，请重新检测 FFmpeg 工具`) : error
     })
-    child.on('close', code => {
+    child.on('close', async code => {
+      await inputDone
       if (options.signal?.aborted) reject(options.signal.reason)
       else if (startError) reject(startError)
       else if (code === 0) resolve(stdout)
@@ -116,7 +118,7 @@ export class FfmpegTools {
         const output = await this.execute(executable, name, ['-version'], { signal: AbortSignal.timeout(5000) })
         const version = output.match(new RegExp(`^${name} version ([^\\s]{1,120})(?:\\s|$)`))?.[1]
         const release = version?.match(/^n?(\d{1,3})\.(\d{1,3})(?:\.\d{1,4})?(?:[-+~_]|$)/i)
-        if (!version || !release || /[-_.](?:dev|alpha|beta|rc)(?:\d|\b)/i.test(version)) return { name, version, status: 'unknown-version' }
+        if (!version || !release || /[-_+~](?:dev|alpha|beta|rc)(?:[^a-z]|$)/i.test(version)) return { name, version, status: 'unknown-version' }
         const approved = Number(release[1]) > 7 || (Number(release[1]) === 7 && Number(release[2]) >= 1)
         return approved ? { name, version, status: 'ready', executable, fingerprint } : { name, version, status: 'outdated' }
       } catch {

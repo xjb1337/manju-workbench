@@ -1,7 +1,14 @@
 import { lstat, readdir, rm } from 'node:fs/promises'
 import path from 'node:path'
 
-export const staleTempPrefixes = ['manju-preview-', 'manju-sample-', 'manju-render-work-', 'manju-shot-cache-'] as const
+export const staleTempPrefixes = [
+  'manju-preview-',
+  'manju-sample-',
+  'manju-render-work-',
+  'manju-shot-cache-',
+  'manju-update-',
+  'manju-signal-',
+] as const
 export const staleTempAgeMs = 24 * 60 * 60 * 1000
 
 /** Removes stale temporary directories matching any allowed prefix without touching unrelated directories. */

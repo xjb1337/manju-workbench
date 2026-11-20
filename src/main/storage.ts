@@ -608,8 +608,9 @@ export class ProjectStore {
       }
       if (!pending.staged.changes.length) throw new Error('没有可合并的变更')
       const next = pending.staged.apply(choices)
+      const committed = await this.withProjectLock((file, assertLock) => this.commit(next, file, assertLock))
       this.pendingPlan = undefined
-      return this.withProjectLock((file, assertLock) => this.commit(next, file, assertLock))
+      return committed
     })
   }
 

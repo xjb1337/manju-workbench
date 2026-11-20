@@ -8,6 +8,9 @@ const { OrphanMediaPreviewError, ProjectConflictError, ProjectStore } = require(
 const { RecentProjects } = require('../dist/main/recent-projects')
 const { exportDestination, subtitleText } = require('../dist/main/render')
 const { mediaResponse, rangeFor } = require('../dist/main/media-protocol')
+const { extractJsonObject, parsePlan } = require('../dist/main/plan-import')
+const { WorkbenchSession } = require('../dist/main/session')
+const { cleanupStaleTempDirs, staleTempAgeMs, staleTempPrefixes } = require('../dist/main/temp-cleanup')
 
 async function workspace(context) {
   const root = await mkdtemp(path.join(tmpdir(), '项目 测试-'))
@@ -542,4 +545,147 @@ test('格式 1 拒绝隐式写入，取消保持字节，确认复制全部素�
   assert.equal(copy.snapshot.brief.theme, '虚构观测')
   assert.deepEqual(await readFile(file), bytes)
   assert.deepEqual(await Promise.all(names.map(name => readFile(path.join(root, 'media', name)))), mediaBytes)
+})
+
+test('mergePlan 遇锁失败后保留待合并预览，解锁后可原地重试且不重复或串味选项', async context => {
+  const root = await workspace(context)
+  const store = await ProjectStore.create(root, '合并重试作品')
+  const episodeId = (await store.edit({ type: 'episode.add', title: '第一集' })).episodes[0].id
+  const shotId = (await store.edit({ type: 'shot.add', episodeId, title: '原镜头名' })).episodes[0].shots[0].id
+  const projectFile = path.join(store.root, 'project.json')
+  const { lock } = require('proper-lockfile')
+
+  const preview1 = await store.previewPlan(episodeId, JSON.stringify({
+    schemaVersion: 1,
+    missing: [],
+    episode: {
+      shots: [
+        { shotId, title: '第一次改名' },
+        { title: '新增镜头甲', frames: 60 },
+      ],
+    },
+  }))
+  const titleConflict1 = preview1.changes.find(change => change.conflict && change.after === '第一次改名')
+  assert.ok(titleConflict1)
+
+  const release1 = await lock(projectFile, { realpath: false })
+  try {
+    await assert.rejects(store.mergePlan(preview1.token, [titleConflict1.id]), /其他窗口正在保存此作品/)
+  } finally {
+    await release1()
+  }
+
+  const afterRetry1 = await store.mergePlan(preview1.token, [])
+  assert.equal(afterRetry1.episodes[0].shots.length, 2)
+  assert.equal(afterRetry1.episodes[0].shots[0].title, '原镜头名')
+  assert.equal(afterRetry1.episodes[0].shots[1].title, '新增镜头甲')
+
+  const preview2 = await store.previewPlan(episodeId, JSON.stringify({
+    schemaVersion: 1,
+    missing: [],
+    episode: {
+      shots: [
+        { shotId, title: '第二次改名' },
+        { title: '新增镜头乙', frames: 90 },
+      ],
+    },
+  }))
+  const titleConflict2 = preview2.changes.find(change => change.conflict && change.after === '第二次改名')
+  assert.ok(titleConflict2)
+
+  const release2 = await lock(projectFile, { realpath: false })
+  try {
+    await assert.rejects(store.mergePlan(preview2.token, [titleConflict2.id]), /其他窗口正在保存此作品/)
+  } finally {
+    await release2()
+  }
+
+  const afterRetry2 = await store.mergePlan(preview2.token, [titleConflict2.id])
+  assert.equal(afterRetry2.episodes[0].shots.length, 3)
+  assert.equal(afterRetry2.episodes[0].shots[0].title, '第二次改名')
+  assert.equal(afterRetry2.episodes[0].shots[2].title, '新增镜头乙')
+})
+
+test('WorkbenchSession.switchProject 在 rememberProject 异常时仍完成状态切换与关闭并清理缓存', async context => {
+  const tempRoot = await workspace(context)
+  const storeA = await ProjectStore.create(tempRoot, '切换甲', true)
+  const storeB = await ProjectStore.create(tempRoot, '切换乙', true)
+
+  let mode = 'reject'
+  const session = new WorkbenchSession({
+    tempRoot,
+    rememberProject: () => {
+      if (mode === 'throw') throw new Error('同步写入失败')
+      return Promise.reject(new Error('异步写入失败'))
+    },
+  })
+
+  const openedA = await session.switchProject(storeA)
+  assert.ok(openedA)
+  assert.equal(session.getStore(openedA.mediaKey), storeA)
+
+  const previewDir = await mkdtemp(path.join(tempRoot, 'manju-preview-'))
+  await session.setPreview(previewDir, path.join(previewDir, 'preview.mp4'))
+  const cacheDir = await session.ensureShotCache()
+
+  const openedB = await session.switchProject(storeB)
+  assert.ok(openedB)
+  assert.equal(session.getStore(openedB.mediaKey), storeB)
+  assert.throws(() => session.getStore(openedA.mediaKey), /作品已关闭或切换/)
+  assert.equal(session.preview, null)
+  assert.equal(session.shotCacheDir, null)
+  await assert.rejects(lstat(previewDir), { code: 'ENOENT' })
+  await assert.rejects(lstat(cacheDir), { code: 'ENOENT' })
+
+  mode = 'throw'
+  assert.equal(await session.switchProject(null), null)
+  assert.equal(session.current, null)
+  assert.throws(() => session.getStore(openedB.mediaKey), /作品已关闭或切换/)
+})
+
+test('extractJsonObject 在围栏不可解析时保留原文回退，支持多围栏与围栏内平衡对象', () => {
+  const outerPlan = {
+    schemaVersion: 1,
+    missing: [],
+    episode: { title: '外层回退', shots: [{ title: '镜头一', frames: 30 }] },
+  }
+  const singleBadFence = `说明文字：\n\`\`\`ts\nconst sample = 1\n\`\`\`\n${JSON.stringify(outerPlan)}`
+  assert.equal(parsePlan(singleBadFence).episode.title, '外层回退')
+
+  const brokenBraceFence = `说明：\n\`\`\`json\n{ "broken": }\n\`\`\`\n${JSON.stringify(outerPlan)}`
+  assert.equal(parsePlan(brokenBraceFence).episode.title, '外层回退')
+
+  const multiFence = `示例：\n\`\`\`\nignored()\n\`\`\`\n正式结果：\n\`\`\`json\n${JSON.stringify(outerPlan)}\n\`\`\``
+  assert.equal(parsePlan(multiFence).episode.title, '外层回退')
+
+  const proseInsideFence = `\`\`\`json\n以下是对象：${JSON.stringify(outerPlan)} 请确认\n\`\`\``
+  assert.deepEqual(JSON.parse(extractJsonObject(proseInsideFence)), outerPlan)
+})
+
+test('staleTempPrefixes 包含 manju-update- 与 manju-signal- 并清理过期目录', async context => {
+  const { utimes } = require('node:fs/promises')
+  const root = await workspace(context)
+  assert.ok(staleTempPrefixes.includes('manju-update-'))
+  assert.ok(staleTempPrefixes.includes('manju-signal-'))
+
+  const now = Date.now()
+  const staleDate = new Date(now - staleTempAgeMs - 60_000)
+  const freshDate = new Date(now - 60_000)
+  const staleUpdate = path.join(root, 'manju-update-old')
+  const staleSignal = path.join(root, 'manju-signal-old')
+  const freshUpdate = path.join(root, 'manju-update-fresh')
+  const unrelated = path.join(root, 'other-old')
+
+  for (const dir of [staleUpdate, staleSignal, freshUpdate, unrelated]) await mkdir(dir)
+  await utimes(staleUpdate, staleDate, staleDate)
+  await utimes(staleSignal, staleDate, staleDate)
+  await utimes(freshUpdate, freshDate, freshDate)
+  await utimes(unrelated, staleDate, staleDate)
+
+  const removed = await cleanupStaleTempDirs(root, staleTempPrefixes, staleTempAgeMs, now)
+  assert.deepEqual(removed.sort(), [staleSignal, staleUpdate].sort())
+  await assert.rejects(lstat(staleUpdate), { code: 'ENOENT' })
+  await assert.rejects(lstat(staleSignal), { code: 'ENOENT' })
+  assert.ok((await lstat(freshUpdate)).isDirectory())
+  assert.ok((await lstat(unrelated)).isDirectory())
 })

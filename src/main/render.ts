@@ -473,6 +473,23 @@ async function* mixedTracks(
   }
 }
 
+export function validateRenderedMedia(
+  info: Awaited<ReturnType<typeof probe>>,
+  width: number,
+  height: number,
+  total: number,
+  hasMusic: boolean,
+) {
+  const video = info.streams.find(stream => stream.codec_type === 'video')
+  const audio = info.streams.find(stream => stream.codec_type === 'audio')
+  if (video?.codec_name !== 'h264' || video.width !== width || video.height !== height
+    || Number(video.nb_frames) !== total
+    || audio?.codec_name !== 'aac' || Math.abs(Number(info.format.duration ?? 0) - total / fps) > 0.10
+    || (hasMusic && Math.abs((Number(audio.duration) || 0) - total / fps) > 0.004)) {
+    throw new Error('成片的音视频轨或时长校验失败')
+  }
+}
+
 export async function renderEpisode(
   store: ProjectStore,
   episode: Episode,
@@ -604,13 +621,7 @@ export async function renderEpisode(
       '-map_metadata', '-1', '-map_chapters', '-1', '-movflags', '+faststart', '-f', 'mp4', complete,
     ], { cwd: workDir, signal: options.signal, input: musicInput })
     const info = await probe(complete, 'mp4', options.signal)
-    const video = info.streams.find(stream => stream.codec_type === 'video')
-    const audio = info.streams.find(stream => stream.codec_type === 'audio')
-    if (video?.codec_name !== 'h264' || video.width !== width || video.height !== height
-      || audio?.codec_name !== 'aac' || Math.abs(Number(info.format.duration ?? 0) - total / fps) > 0.10
-      || (music && (Number(video.nb_frames) !== total || Math.abs((Number(audio.duration) || 0) - total / fps) > 0.004))) {
-      throw new Error('成片的音视频轨或时长校验失败')
-    }
+    validateRenderedMedia(info, width, height, total, !!music)
     await checkedFile(complete)
     if (musicPath && await fileFingerprint(musicPath, options.signal) !== musicHash) throw new Error('渲染期间背景音乐文件已变化')
     const handle = await open(complete, 'r+')

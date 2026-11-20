@@ -5,7 +5,7 @@ const { tmpdir } = require('node:os')
 const path = require('node:path')
 const { test } = require('node:test')
 const { ProjectStore, ProjectConflictError } = require('../dist/main/storage')
-const { renderEpisode } = require('../dist/main/render')
+const { renderEpisode, validateRenderedMedia } = require('../dist/main/render')
 
 function ffmpeg(...args) {
   return execFileSync('ffmpeg', ['-nostdin', '-v', 'error', ...args])
@@ -316,4 +316,31 @@ test('反相立体声配音仍压低背景音乐，AAC 短音频可循环且保�
   const ducked = amplitude(left, 400, 0.2)
   assert.ok(recovered > 0.03 && ducked < recovered * 0.35, `反相配音压低音乐 ${ducked} / ${recovered}`)
   assert.ok(amplitude(left, 400, 1.40) > 0.03, '音乐保留到时间线尾部')
+})
+
+test('无配乐成片同样校验视频总帧数，掉帧或增帧时拒绝发布', async context => {
+  const validInfo = {
+    streams: [
+      { codec_type: 'video', codec_name: 'h264', width: 1280, height: 720, nb_frames: '35' },
+      { codec_type: 'audio', codec_name: 'aac', duration: '1.166667' },
+    ],
+    format: { duration: '1.167' },
+  }
+  validateRenderedMedia(validInfo, 1280, 720, 35, false)
+  assert.throws(
+    () => validateRenderedMedia({
+      ...validInfo,
+      streams: [
+        { codec_type: 'video', codec_name: 'h264', width: 1280, height: 720, nb_frames: '34' },
+        validInfo.streams[1],
+      ],
+    }, 1280, 720, 35, false),
+    /成片的音视频轨或时长校验失败/,
+  )
+
+  const { store, root } = await fixture(context, [15, 20])
+  const output = path.join(root, '无配乐成片.mp4')
+  await renderEpisode(store, store.snapshot.episodes[0], output, { signal: new AbortController().signal })
+  const [video] = streamInfo(output)
+  assert.equal(video.nb_frames, '35')
 })

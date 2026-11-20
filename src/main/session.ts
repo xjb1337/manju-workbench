@@ -107,21 +107,30 @@ export class WorkbenchSession<TStore extends SessionStore = ProjectStore> {
     if (previous) await rm(previous, { recursive: true, force: true }).catch(() => {})
   }
 
+  private async safeRemember(store: TStore, project?: Project): Promise<void> {
+    if (!this.rememberProject) return
+    try {
+      const { title, fictional } = project ?? store.snapshot
+      await this.rememberProject({ directory: store.root, title, fictional })
+    } catch {
+      // Best-effort recent project persistence; do not block switching or closing.
+    }
+  }
+
   async switchProject(store: TStore | null): Promise<OpenProject | null> {
     await this.dropPreview()
     await this.dropShotCache()
-    if (this.current) {
-      const { title, fictional } = this.current.store.snapshot
-      await this.rememberProject?.({ directory: this.current.store.root, title, fictional })
-    }
+    const previous = this.current
     if (!store) {
       this.current = null
+      if (previous) await this.safeRemember(previous.store)
       return null
     }
     const project: Project = store.snapshot
-    await this.rememberProject?.({ directory: store.root, title: project.title, fictional: project.fictional })
     const key = randomUUID()
     this.current = { store, key }
+    if (previous) await this.safeRemember(previous.store)
+    await this.safeRemember(store, project)
     return { project, mediaKey: key, directory: store.root }
   }
 
