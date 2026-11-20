@@ -164,11 +164,42 @@ test('离线、普通 HTTP 403、主限流和次级限流各自明确，备用�
   await assert.rejects(openOfficialReleasePage(async () => { throw new Error('no default handler') }), /无法打开官方发布页/)
 })
 
+function checkWorkflowContexts(value, location = '') {
+  if (value && typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) {
+      checkWorkflowContexts(child, location ? `${location}.${key}` : key)
+    }
+  }
+  if (typeof value !== 'string') return
+
+  // https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#available-contexts
+  const step = /^jobs\.[^.]+\.steps\.\d+\.(?:continue-on-error|if|name|run|timeout-minutes|working-directory|(?:env|with)\.[^.]+)$/.test(location)
+  const output = /^jobs\.[^.]+\.(?:environment\.url|outputs\.[^.]+)$/.test(location)
+  const containerEnv = /^jobs\.[^.]+\.(?:container|services\.[^.]+)\.env\.[^.]+$/.test(location)
+  const available = {
+    runner: step || output || containerEnv,
+    job: step || output || containerEnv,
+    steps: step || output,
+    jobs: /^on\.workflow_call\.outputs\.[^.]+\.value$/.test(location),
+    env: !/^jobs\.[^.]+\.env\./.test(location),
+  }
+  const expressions = Array.from(value.matchAll(/\$\{\{((?:'(?:[^']|'')*'|[^'}]|\}(?!\}))*?)\}\}/g), match => match[1])
+  if (!expressions.length && /^jobs\.[^.]+\.(?:steps\.\d+\.)?if$/.test(location)) expressions.push(value)
+  for (const expression of expressions) {
+    // Skip string literals and property names, such as github.event.job.
+    for (const [, name] of expression.matchAll(/'(?:[^']|'')*'|\.\s*[a-z_][\w-]*|([a-z_][\w-]*)/gi)) {
+      const context = name?.toLowerCase()
+      if (Object.hasOwn(available, context)) assert.ok(available[context], `${location} 不允许使用 ${context} 上下文`)
+    }
+  }
+}
+
 test('Windows workflow 仅手动打包且只上传四个精确命名的 Actions 附件', async () => {
   // Use the YAML parser already locked by the packaging tool.
   const { load } = createRequire(require.resolve('app-builder-lib/package.json'))('js-yaml')
   const root = path.join(__dirname, '..')
   const yaml = load(await readFile(path.join(root, '.github/workflows/package-windows.yml'), 'utf8'))
+  checkWorkflowContexts(yaml)
   assert.deepEqual(yaml.on, { workflow_dispatch: null })
   assert.deepEqual(yaml.permissions, { contents: 'read' })
   assert.deepEqual(Object.keys(yaml.jobs), ['package'])
@@ -179,8 +210,14 @@ test('Windows workflow 仅手动打包且只上传四个精确命名的 Actions 
   assert.deepEqual(job.steps.flatMap(step => step.uses ? [step.uses.split('@')[0]] : []),
     ['actions/checkout', 'actions/setup-node', 'actions/upload-artifact'])
   assert.equal(job.steps[0].with['persist-credentials'], false)
-  assert.ok(job.steps.some(step => step.run === 'npx.cmd --no-install electron-builder --win portable --x64 --publish never'))
-  const packages = job.steps.find(step => step.id === 'packages').run
+  const portable = job.steps.find(step => step.run === 'npx.cmd --no-install electron-builder --win portable --x64 --publish never')
+  const setup = job.steps.find(step => step.id === 'packages')
+  const cache = '${{ runner.temp }}/manju-builder-cache'
+  assert.equal(portable?.env?.ELECTRON_BUILDER_CACHE, cache)
+  assert.equal(setup?.env?.ELECTRON_BUILDER_CACHE, cache)
+  const packages = setup.run
+  assert.match(packages, /Get-ChildItem -LiteralPath \$env:ELECTRON_BUILDER_CACHE -Filter makensis\.exe/)
+  assert.match(packages, /\$compilers\.Count -ne 1/)
   assert.match(packages, /Get-Content package\.json -Raw/)
   assert.match(packages, /node scripts\/pack-native\.cjs \$compiler release\/win-unpacked \$setup/)
   assert.match(packages, /node scripts\/write-update-manifest\.cjs --sha256 \$setup \$portable/)
