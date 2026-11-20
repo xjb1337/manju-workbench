@@ -481,6 +481,30 @@ test('RecentProjects 支持 aiGateway 预设、地址与模型持久化', async 
   })
 })
 
+test('保存网关设置会校验全部 DNS 结果，拒绝时保留原默认；旧公网设置不影响其他偏好', async context => {
+  const root = await workspace(context)
+  const prefs = await RecentProjects.open(root)
+  await prefs.setTheme('dark')
+  const file = path.join(root, 'workbench-preferences.json')
+  const before = await readFile(file)
+  const config = { preset: 'custom', baseUrl: 'http://gateway.example/v1', model: 'trial' }
+  const lan = { address: '192.168.1.30', family: 4 }
+  await assert.rejects(prefs.setAiGateway({ ...config, baseUrl: 'http://8.8.8.8' }), /仅允许/)
+  await assert.rejects(prefs.setAiGateway(config, async () => [lan, { address: '1.1.1.1', family: 4 }]), /仅允许/)
+  await assert.rejects(prefs.setAiGateway(config, async () => []), /无法确认/)
+  assert.deepEqual(await readFile(file), before)
+  assert.equal(prefs.aiGateway.model, 'group/never-stuck')
+  await prefs.setAiGateway(config, async name => {
+    assert.equal(name, 'gateway.example')
+    return [lan]
+  })
+  assert.deepEqual((await RecentProjects.open(root)).aiGateway, config)
+  await writeFile(file, JSON.stringify({ recent: [], theme: 'dark', aiGateway: { ...config, baseUrl: 'http://8.8.8.8' } }))
+  const reopened = await RecentProjects.open(root)
+  assert.equal(reopened.theme, 'dark')
+  assert.equal(reopened.aiGateway.baseUrl, 'http://127.0.0.1:3425/v1')
+})
+
 test('格式 1 拒绝隐式写入，取消保持字节，确认复制全部素材版本及待合并规划', async context => {
   const { legacyFixture } = require('./legacy-fixture.cjs')
   const parent = await workspace(context)

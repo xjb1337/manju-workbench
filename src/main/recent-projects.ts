@@ -5,6 +5,7 @@ import { z } from 'zod'
 import type { RecentProject } from '../shared/api'
 import { idSchema, titleSchema } from '../shared/model'
 import { aiGatewayConfigSchema, defaultAiGatewayConfig, type AiGatewayConfig } from '../shared/plan'
+import { describeAiGateway, type GatewayLookup } from './ai-gateway'
 import { atomicJson } from './storage'
 
 const recentLimit = 5
@@ -24,7 +25,7 @@ const preferencesSchema = z.object({
   mediaDirectory: absolutePath.optional(),
   theme: themeSchema.optional(),
   windowBounds: windowBoundsSchema.optional(),
-  aiGateway: aiGatewayConfigSchema.optional(),
+  aiGateway: aiGatewayConfigSchema.optional().catch(undefined),
 })
 
 function sameDirectory(a: string, b: string) {
@@ -60,12 +61,15 @@ export class RecentProjects {
     return this.preferences.aiGateway ? { ...this.preferences.aiGateway } : { ...defaultAiGatewayConfig }
   }
 
-  async setAiGateway(config: AiGatewayConfig) {
+  async setAiGateway(config: AiGatewayConfig, resolve?: GatewayLookup) {
     const next = aiGatewayConfigSchema.parse(config)
-    const prev = this.preferences.aiGateway
-    if (prev && prev.preset === next.preset && prev.baseUrl === next.baseUrl && prev.model === next.model) return next
-    this.preferences.aiGateway = next
-    await this.save()
+    await describeAiGateway(next.baseUrl, resolve)
+    await this.queueSave(async () => {
+      const prev = this.preferences.aiGateway
+      if (prev && prev.preset === next.preset && prev.baseUrl === next.baseUrl && prev.model === next.model) return
+      await atomicJson(this.file, { ...this.preferences, aiGateway: next })
+      this.preferences.aiGateway = next
+    })
     return { ...next }
   }
 
@@ -117,10 +121,12 @@ export class RecentProjects {
   }
 
   private save() {
-    const run = this.saveTail.then(async () => {
-      await atomicJson(this.file, this.preferences).catch(error => console.error('preferences:save', error))
-    })
-    this.saveTail = run
+    return this.queueSave(async () => { await atomicJson(this.file, this.preferences) }).catch(() => {})
+  }
+
+  private queueSave(write: () => Promise<void>) {
+    const run = this.saveTail.then(write)
+    this.saveTail = run.catch(error => console.error('preferences:save', error))
     return run
   }
 }

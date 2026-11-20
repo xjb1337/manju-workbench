@@ -1,7 +1,7 @@
 import type { MediaTarget, Mutation, Project } from './model'
 import type { DetailKind, GenerationKind } from './creative'
 
-import type { AiConnectionTestResult, AiGatewayConfig, PlanPreview } from './plan'
+import type { AiConnectionTestResult, AiGatewayConfig, AiNetwork, AiRequestTarget, PlanPreview } from './plan'
 
 export interface OpenProject {
   project: Project
@@ -41,16 +41,17 @@ export interface Workbench {
   close(): Promise<Reply<null>>
   edit(key: string, change: Mutation): Promise<Reply<Project>>
   previewPlan(key: string, episodeId: string | null, text: string): Promise<Reply<PlanPreview>>
-  generateMagpiePlan(key: string, episodeId: string | null, model: string, script: string): Promise<Reply<PlanPreview | null>>
+  generateMagpiePlan(key: string, episodeId: string | null, target: AiRequestTarget, script: string): Promise<Reply<PlanPreview | null>>
   generateShotDetailDraft(
-    key: string, episodeId: string, shotId: string, kind: DetailKind, body: string, instruction: string,
+    key: string, episodeId: string, shotId: string, kind: DetailKind, target: AiRequestTarget, body: string, instruction: string,
   ): Promise<Reply<string | null>>
   generateScriptDraft(
-    key: string, scope: 'project' | 'episode', episodeId: string | null, script: string, instruction: string,
+    key: string, scope: 'project' | 'episode', episodeId: string | null, target: AiRequestTarget, script: string, instruction: string,
   ): Promise<Reply<string | null>>
   cancelPlanGeneration(key: string): Promise<Reply<null>>
   getAiConfig(): Promise<Reply<AiGatewayConfig>>
   setAiConfig(config: AiGatewayConfig): Promise<Reply<AiGatewayConfig>>
+  describeAiTarget(baseUrl: string): Promise<Reply<AiNetwork>>
   testAiConnection(config: AiGatewayConfig): Promise<Reply<AiConnectionTestResult>>
   mergePlan(key: string, token: string, replacements: string[]): Promise<Reply<Project>>
   importMedia(key: string, target: MediaTarget): Promise<Reply<Project | null>>

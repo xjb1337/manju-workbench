@@ -6,7 +6,7 @@ import { folderNameSchema, type MediaTarget, type Mutation, type Project, type T
 import { defaultAiGatewayConfig, type AiGatewayConfig } from '../shared/plan'
 import { exportFallbacks, productionProgress, type StepId } from '../shared/production'
 import { legacyDetail, savedShotPrompt } from '../shared/prompts'
-import { AiSettingsDialog, sameGateway, ScriptAiDialog, type GatewayProbe } from './AiPanels'
+import { AiSettingsDialog, sameGateway, ScriptAiDialog, type AiPanelOptions, type GatewayProbe } from './AiPanels'
 import { Badge, Modal, NameModal, PreviewPlayer, kindLabel, sequence } from './components'
 import { BriefPanel, DetailDialog, PlanImportDialog, PlanningDialog } from './CreativePanels'
 import { Inspector } from './Inspector'
@@ -69,6 +69,12 @@ export function App() {
   const discoveredModels = gatewayProbe && 'result' in gatewayProbe && sameGateway(aiConfig, gatewayProbe)
     ? gatewayProbe.result.models : []
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false)
+  const aiPanel: AiPanelOptions = {
+    config: aiConfig,
+    discoveredModels,
+    openSettings: () => setAiSettingsOpen(true),
+    setDefault: (model, failure) => void saveAiConfig({ ...aiConfig, model }, failure),
+  }
   const [scriptAi, setScriptAi] = useState<{
     scope: 'project' | 'episode'; script: string; apply: (next: string) => void
   } | null>(null)
@@ -581,20 +587,11 @@ export function App() {
       openTool={failure => void run(() => api.openTool(opened.mediaKey, 'planning'), undefined, failure)}
       close={() => { if (!busy) setCreativeDialog(null) }} />}
     {opened && project && (creativeDialog === 'import' || creativeDialog === 'magpie') &&
-      <PlanImportDialog key={creativeDialog} episode={episode} fictional={project.fictional} busy={busy}
-      aiConfig={aiConfig} discoveredModels={discoveredModels}
-      onOpenAiSettings={() => setAiSettingsOpen(true)}
-      onSaveModel={model => {
-        if (model !== aiConfig.model) {
-          void api.setAiConfig({ ...aiConfig, model }).then(reply => {
-            if (reply.ok) setAiConfig(reply.value)
-          }).catch(() => {})
-        }
-      }}
+      <PlanImportDialog key={creativeDialog} project={project} episode={episode} busy={busy} ai={aiPanel}
       source={creativeDialog === 'magpie' ? {
         kind: 'magpie', script: magpieSeedScript ?? (episode?.script || project.script),
-        preview: (model, script, acceptPreview, failure) => void run(
-          () => api.generateMagpiePlan(opened.mediaKey, episode?.id ?? null, model, script), acceptPreview, failure),
+        preview: (target, script, acceptPreview, failure) => void run(
+          () => api.generateMagpiePlan(opened.mediaKey, episode?.id ?? null, target, script), acceptPreview, failure),
         cancel: failure => void api.cancelPlanGeneration(opened.mediaKey).then(reply => {
           if (!reply.ok) failure(reply.error)
         }).catch(() => failure('桌面进程连接中断')),
@@ -609,9 +606,9 @@ export function App() {
       close={() => { if (!busy) { setCreativeDialog(null); setMagpieSeedScript(null) } }} />}
     {opened && project && episode && shot && creativeDialog && creativeDialog !== 'plan' && creativeDialog !== 'import' && creativeDialog !== 'magpie' &&
       <DetailDialog key={shot.id + creativeDialog} project={project} episode={episode} shot={shot} kind={creativeDialog} busy={busy}
-        aiConfig={aiConfig} onOpenAiSettings={() => setAiSettingsOpen(true)}
-        onOptimize={(body, instruction, acceptDraft, failure) => void run(
-          () => api.generateShotDetailDraft(opened.mediaKey, episode.id, shot.id, creativeDialog, body, instruction),
+        ai={aiPanel}
+        onOptimize={(target, body, instruction, acceptDraft, failure) => void run(
+          () => api.generateShotDetailDraft(opened.mediaKey, episode.id, shot.id, creativeDialog, target, body, instruction),
           acceptDraft, failure,
         )}
         onCancelOptimize={failure => void api.cancelPlanGeneration(opened.mediaKey).then(reply => {
@@ -629,11 +626,10 @@ export function App() {
         } : undefined}
         close={() => setCreativeDialog(null)} />}
     {opened && project && scriptAi && <ScriptAiDialog
-      scope={scriptAi.scope} episodeTitle={episode?.title} fictional={project.fictional}
-      currentScript={scriptAi.script} aiConfig={aiConfig} busy={busy}
-      onOpenSettings={() => setAiSettingsOpen(true)}
-      onGenerate={(instruction, acceptDraft, failure) => void run(
-        () => api.generateScriptDraft(opened.mediaKey, scriptAi.scope, episode?.id ?? null, scriptAi.script, instruction),
+      scope={scriptAi.scope} project={project} episode={episode}
+      currentScript={scriptAi.script} ai={aiPanel} busy={busy}
+      onGenerate={(target, instruction, acceptDraft, failure) => void run(
+        () => api.generateScriptDraft(opened.mediaKey, scriptAi.scope, episode?.id ?? null, target, scriptAi.script, instruction),
         acceptDraft, failure,
       )}
       onCancel={failure => void api.cancelPlanGeneration(opened.mediaKey).then(reply => {

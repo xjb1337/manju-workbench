@@ -20,14 +20,15 @@ const bridge: Workbench = {
   close: () => ipcRenderer.invoke('project:close'),
   edit: (key, change) => ipcRenderer.invoke('project:edit', key, change),
   previewPlan: (key, episodeId, text) => ipcRenderer.invoke('plan:preview', key, episodeId, text),
-  generateMagpiePlan: (key, episodeId, model, script) => ipcRenderer.invoke('plan:generate-magpie', key, episodeId, model, script),
-  generateShotDetailDraft: (key, episodeId, shotId, kind, body, instruction) =>
-    ipcRenderer.invoke('ai:generate-shot-detail', key, episodeId, shotId, kind, body, instruction),
-  generateScriptDraft: (key, scope, episodeId, script, instruction) =>
-    ipcRenderer.invoke('ai:generate-script', key, scope, episodeId, script, instruction),
+  generateMagpiePlan: (key, episodeId, target, script) => ipcRenderer.invoke('plan:generate-magpie', key, episodeId, target, script),
+  generateShotDetailDraft: (key, episodeId, shotId, kind, target, body, instruction) =>
+    ipcRenderer.invoke('ai:generate-shot-detail', key, episodeId, shotId, kind, target, body, instruction),
+  generateScriptDraft: (key, scope, episodeId, target, script, instruction) =>
+    ipcRenderer.invoke('ai:generate-script', key, scope, episodeId, target, script, instruction),
   cancelPlanGeneration: key => ipcRenderer.invoke('plan:cancel-generation', key),
   getAiConfig: () => ipcRenderer.invoke('ai:get-config'),
   setAiConfig: config => ipcRenderer.invoke('ai:set-config', config),
+  describeAiTarget: baseUrl => ipcRenderer.invoke('ai:describe-target', baseUrl),
   testAiConnection: config => ipcRenderer.invoke('ai:test-connection', config),
   mergePlan: (key, token, replacements) => ipcRenderer.invoke('plan:merge', key, token, replacements),
   importMedia: (key, target) => ipcRenderer.invoke('project:import', key, target),

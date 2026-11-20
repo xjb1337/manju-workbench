@@ -10,7 +10,8 @@ export const sequence = (index: number) => String(index + 1).padStart(2, '0')
 export const mediaUrl = (opened: OpenProject, version: Version) => `manju-media://project/${opened.mediaKey}/${version.id}`
 
 export function Badge({ value }: { value: string }) {
-  const color = { 待制作: 'idle', 待审核: 'review', 已通过: 'approved', 需更新: 'review', 冲突: 'review', 已保存: 'approved', 来自规划: 'fiction', 未保存: 'idle' }[value] ?? 'fiction'
+  const color = { 待制作: 'idle', 待审核: 'review', 已通过: 'approved', 需更新: 'review', 冲突: 'review', 已保存: 'approved',
+    来自规划: 'fiction', 未保存: 'idle', '局域网明文 HTTP': 'review' }[value] ?? 'fiction'
   return <span className={`badge ${color}`}>{value}</span>
 }
 

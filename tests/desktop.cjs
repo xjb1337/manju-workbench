@@ -96,6 +96,16 @@ const choose = (app, file, type = 'openChoices') => app.evaluate((_electron, { f
 const documentAt = file => readFile(file, 'utf8').then(JSON.parse)
 const hash = async file => createHash('sha256').update(await readFile(file)).digest('hex')
 const screenshot = (page, name) => page.screenshot({ path: path.join(screenshots, name), animations: 'disabled' })
+const aiConfigAt = async page => {
+  const reply = await page.evaluate(() => window.workbench.getAiConfig())
+  assert.equal(reply.ok, true)
+  return reply.value
+}
+async function aiRequestPreview(dialog) {
+  const preview = dialog.locator('.ai-request details')
+  await preview.getByText('查看将发送的内容', { exact: true }).click()
+  return JSON.parse(await preview.locator('pre').textContent())
+}
 const footerSaved = async page => {
   await page.locator('footer').getByText('已保存', { exact: true }).waitFor()
   assert.equal(await page.getByRole('alert').count(), 0)
@@ -203,7 +213,8 @@ async function verifyScriptDraft(folder) {
 }
 
 async function verifyMagpieDraft(app, page, file, first) {
-  const before = await documentAt(file)
+  const before = await hash(file)
+  const baseline = await aiConfigAt(page)
   await app.evaluate((_electron, shotId) => {
     const original = globalThis.fetch
     globalThis.restoreMagpieFetch = () => { globalThis.fetch = original }
@@ -224,46 +235,57 @@ async function verifyMagpieDraft(app, page, file, first) {
     }
   }, first.id)
   try {
-    await button(stage(page), before.script.trim() || before.episodes[0]?.script.trim() ? 'AI 生成分镜草案' : '粘贴剧本').click()
+    const project = await documentAt(file)
+    await button(stage(page), project.script.trim() || project.episodes[0]?.script.trim() ? 'AI 生成分镜草案' : '粘贴剧本').click()
     const dialog = page.getByRole('dialog', { name: 'AI 生成分镜草案', exact: true })
     const script = '虚构剧本片段：画面出现一束信号。'
     assert.equal(await dialog.getByLabel('Magpie 模型 ID').inputValue(), 'group/never-stuck')
+    await dialog.getByLabel('Magpie 模型 ID').fill('trial/cancel')
     await dialog.getByLabel('剧本文本').fill(script)
     await button(dialog, '生成草案').click()
     await dialog.getByRole('status').getByText(/正在等待/).waitFor()
     await button(dialog, '停止等待').click()
     await dialog.getByRole('status').getByText('已停止等待').waitFor()
-    assert.deepEqual(await documentAt(file), before)
+    assert.equal(await hash(file), before)
+    assert.deepEqual(await aiConfigAt(page), baseline)
 
     await app.evaluate(() => { globalThis.magpieMode = 'limited' })
+    await dialog.getByLabel('Magpie 模型 ID').fill('trial/failed')
     await button(dialog, '生成草案').click()
     await dialog.getByRole('alert').getByText(/HTTP 429/).waitFor()
-    assert.deepEqual(await documentAt(file), before)
+    assert.equal(await hash(file), before)
+    assert.deepEqual(await aiConfigAt(page), baseline)
 
     await app.evaluate(() => { globalThis.magpieMode = 'success' })
     await dialog.getByLabel('Magpie 模型 ID').fill('provider/other-text-model')
+    const disclosed = await aiRequestPreview(dialog)
     await button(dialog, '生成草案').click()
     const preview = page.getByRole('dialog', { name: 'AI 分镜草案预览', exact: true })
     await preview.getByText('虚构试验镜头', { exact: true }).waitFor()
     assert.equal(await preview.locator('.diff-row').count(), 1)
     assert.equal(await preview.getByRole('combobox').inputValue(), 'keep')
     assert.equal(await button(preview, '确认合并').isDisabled(), true)
-    assert.deepEqual(await documentAt(file), before)
+    assert.equal(await hash(file), before)
+    assert.deepEqual(await aiConfigAt(page), baseline)
     await button(preview, '返回编辑').click()
     assert.equal(await dialog.getByLabel('剧本文本').inputValue(), script)
     assert.equal(await dialog.getByLabel('Magpie 模型 ID').inputValue(), 'provider/other-text-model')
     const request = await app.evaluate(() => globalThis.magpieRequests.at(-1))
+    assert.deepEqual(request, disclosed)
     assert.equal(request.model, 'provider/other-text-model')
     assert.match(request.messages[0].content, /虚构剧本片段/)
     await button(dialog, '取消').click()
+    assert.equal(await hash(file), before)
+    assert.deepEqual(await aiConfigAt(page), baseline)
   } finally {
     await app.evaluate(() => globalThis.restoreMagpieFetch())
   }
 }
 
 async function verifyAiWorkbenchFlows(app, page, file, first) {
-  const before = await documentAt(file)
-  await app.evaluate(() => {
+  const before = await hash(file)
+  const lanUrl = 'http://192.168.80.14:11434/v1'
+  await app.evaluate((_electron, lanUrl) => {
     const original = globalThis.fetch
     globalThis.restoreAiFetch = () => { globalThis.fetch = original }
     globalThis.aiRequests = []
@@ -271,10 +293,11 @@ async function verifyAiWorkbenchFlows(app, page, file, first) {
       if (url === 'http://127.0.0.1:19443/v1/models') {
         return new Response('<html>Fixture</html>', { headers: { 'content-type': 'text/html' } })
       }
-      if (url === 'http://127.0.0.1:11434/v1/models') {
+      if (url === 'http://127.0.0.1:11434/v1/models' || url === `${lanUrl}/models`) {
+        assertProbe(init)
         return Response.json({ data: [{ id: 'qwen2.5:14b' }, { id: 'llama3.2:latest' }] })
       }
-      if (url === 'http://127.0.0.1:11434/v1/chat/completions') {
+      if (url === `${lanUrl}/chat/completions`) {
         const body = JSON.parse(init.body)
         globalThis.aiRequests.push(body)
         const promptText = body.messages[0].content
@@ -285,12 +308,19 @@ async function verifyAiWorkbenchFlows(app, page, file, first) {
       }
       return original(url, init)
     }
-  })
+    function assertProbe(init) {
+      if (init.method !== 'GET' || init.body !== undefined) throw new Error('连接测试只能读取模型列表')
+    }
+  }, lanUrl)
   try {
     await button(page, 'AI 设置').click()
     const settings = page.getByRole('dialog', { name: 'AI 网关设置', exact: true })
     await settings.getByLabel('网关预设').selectOption('ollama')
     assert.equal(await settings.getByLabel('网关地址').inputValue(), 'http://127.0.0.1:11434/v1')
+    await settings.getByLabel('网关地址').fill('https://8.8.8.8/v1')
+    await button(settings, '测试连接').click()
+    await settings.getByText('AI 网关仅允许本机或局域网地址', { exact: true }).waitFor()
+    await settings.getByLabel('网关地址').fill('http://127.0.0.1:11434/v1')
     await button(settings, '测试连接').click()
     const status = settings.getByRole('status')
     await status.getByText(/^服务可达/).waitFor()
@@ -311,29 +341,40 @@ async function verifyAiWorkbenchFlows(app, page, file, first) {
     await settings.getByLabel('网关预设').selectOption('lmstudio')
     assert.equal(await status.count(), 0)
     await settings.getByLabel('网关预设').selectOption('ollama')
+    await settings.getByLabel('网关地址').fill(lanUrl)
     await button(settings, '测试连接').click()
     await status.getByText('模型列表有效（2 个模型）', { exact: true }).waitFor()
     await settings.getByRole('button', { name: 'llama3.2:latest' }).click()
     assert.equal(await settings.getByLabel('默认模型 ID').inputValue(), 'llama3.2:latest')
     await button(settings, '保存设置').click()
     await settings.waitFor({ state: 'hidden' })
+    const baseline = await aiConfigAt(page)
 
     await button(directory(page), '剧本').click()
     await button(stage(page), 'AI 辅助写剧本').click()
     const scriptAi = page.getByRole('dialog', { name: 'AI 辅助写剧本', exact: true })
+    await scriptAi.getByText(`${lanUrl}/chat/completions`, { exact: true }).waitFor()
+    await scriptAi.getByText('局域网明文 HTTP', { exact: true }).waitFor()
+    await scriptAi.getByLabel('模型 ID').fill('trial/script')
     await scriptAi.getByLabel(/编写或改写要求/).fill('补充开场脉冲描述')
+    const disclosedScript = await aiRequestPreview(scriptAi)
+    assert.equal(disclosedScript.model, 'trial/script')
+    await screenshot(page, 'feature-ai-lan-request-light.png')
     await button(scriptAi, '生成剧本草案').click()
     const scriptPreview = page.getByRole('dialog', { name: 'AI 剧本草案预览', exact: true })
     await scriptPreview.getByText('AI 剧本草案：第一场，观测站脉冲亮起。').waitFor()
+    assert.deepEqual(await app.evaluate(() => globalThis.aiRequests.at(-1)), disclosedScript)
+    assert.deepEqual(await aiConfigAt(page), baseline)
     await button(scriptPreview, '应用到编辑器').click()
     await scriptPreview.waitFor({ state: 'hidden' })
     assert.equal(await stage(page).getByLabel('剧本').inputValue(), 'AI 剧本草案：第一场，观测站脉冲亮起。')
     await keepScriptDraft(page, 'AI 剧本草案：第一场，观测站脉冲亮起。', '作品剧本')
-    assert.deepEqual(await documentAt(file), before)
+    assert.equal(await hash(file), before)
     await button(stage(page), 'AI 生成分镜草案').click()
     const seededDialog = page.getByRole('dialog', { name: 'AI 生成分镜草案', exact: true })
     assert.equal(await seededDialog.getByLabel('剧本文本').inputValue(), 'AI 剧本草案：第一场，观测站脉冲亮起。')
     assert.equal(await seededDialog.getByLabel('模型 ID').inputValue(), 'llama3.2:latest')
+    await seededDialog.getByText('局域网明文 HTTP', { exact: true }).waitFor()
     await button(seededDialog, '取消').click()
 
     await button(directory(page), '分镜').click()
@@ -341,13 +382,30 @@ async function verifyAiWorkbenchFlows(app, page, file, first) {
     await selectStep(page, 'shots')
     await guide(page).getByRole('button', { name: 'AI 生成分镜草案' }).waitFor()
     await button(page, `镜头 01 ${first.title}`).click()
+    await button(page, '切换深色').click()
     await page.getByRole('button', { name: /代码任务书/ }).click()
     const detail = page.getByRole('dialog', { name: /代码任务书/ })
+    await detail.getByText('局域网明文 HTTP', { exact: true }).waitFor()
+    await detail.getByLabel('模型 ID').fill('trial/shot')
     await detail.getByLabel('AI 优化要求').fill('强化波形对比度')
+    const disclosedDetail = await aiRequestPreview(detail)
+    assert.equal(disclosedDetail.model, 'trial/shot')
+    await screenshot(page, 'feature-ai-lan-request-dark.png')
     await button(detail, 'AI 优化提示词').click()
     await detail.getByText('AI 优化提示词：深蓝网格与高对比脉冲波形，30fps。').waitFor()
+    assert.deepEqual(await app.evaluate(() => globalThis.aiRequests.at(-1)), disclosedDetail)
+    assert.deepEqual(await aiConfigAt(page), baseline)
     await button(detail, '放弃建议').click()
+    assert.equal(await hash(file), before)
+    await button(detail, '设为默认').click()
+    await page.waitForFunction(async () => {
+      const reply = await window.workbench.getAiConfig()
+      return reply.ok && reply.value.model === 'trial/shot'
+    })
+    assert.equal(await button(detail, '设为默认').isDisabled(), true)
+    assert.deepEqual(await aiConfigAt(page), { ...baseline, model: 'trial/shot' })
     await button(detail, '关闭').click()
+    await button(page, '切换浅色').click()
 
     await button(page, 'AI 设置').click()
     const resetSettings = page.getByRole('dialog', { name: 'AI 网关设置', exact: true })
@@ -355,6 +413,19 @@ async function verifyAiWorkbenchFlows(app, page, file, first) {
     await button(resetSettings, '保存设置').click()
     await resetSettings.waitFor({ state: 'hidden' })
     await button(directory(page), '制作简报').click()
+    const style = stage(page).getByLabel('风格', { exact: true })
+    const savedStyle = await style.inputValue()
+    await style.fill('简报内的未保存草稿')
+    await stage(page).getByRole('button', { name: /^(粘贴剧本|AI 生成分镜草案)$/ }).click()
+    const canceled = page.getByRole('dialog', { name: 'AI 生成分镜草案', exact: true })
+    await canceled.getByLabel('剧本文本').fill('测试待发送剧本')
+    const disclosed = await aiRequestPreview(canceled)
+    assert.ok(!disclosed.messages[0].content.includes('简报内的未保存草稿'))
+    await button(canceled, '取消').click()
+    assert.equal(await hash(file), before)
+    assert.equal(await style.inputValue(), '简报内的未保存草稿')
+    await style.fill(savedStyle)
+    await footerSaved(page)
   } finally {
     await app.evaluate(() => globalThis.restoreAiFetch())
   }
@@ -1349,6 +1420,7 @@ async function main() {
       voiceDialogueConfirmedAndSrtExported: true, previewRebuildReplacedSessionCache: true,
       emptyProjectPrimaryActionChangedAfterScript: true, briefScrollLabelVisibleAtMinimumSize: true,
       gatewayModelListAndHtmlDistinguished: true, manualUpdateFallbackDidNotLaunchSetup: true,
+      aiRequestBodiesMatchThreeDisclosures: true, temporaryModelPreservesDefault: true, aiCancelPreservesBriefDraftAndProject: true,
     }, null, 2))
     await writeFile(path.join(verify, 'latest-success.txt'), folder + '\n')
     console.log('已有 MP4 保留，取消对话框 / 编码中取消 / 第四镜缺源三条路径 SHA-256 一致：', sha)

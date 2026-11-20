@@ -319,9 +319,6 @@ dialog:has(.creative-dialog) { width: min(855px, calc(100vw - 42px)); max-height
 .creative-dialog .long-prompt { min-height: 150px; max-height: 48dvh; resize: vertical; font-family: inherit; font-size: 14px; }
 .creative-dialog .dialog-actions { align-items: center; flex-wrap: wrap; }
 .dialog-status { flex: 1; color: var(--ok); font-size: 12px; }
-.magpie-settings { margin-bottom: 12px; }
-.magpie-settings p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
-.magpie-settings input { max-width: 24rem; }
 .import-target, .detail-header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; color: var(--muted); }
 .import-target { flex-wrap: wrap; }
 .plan-diff-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
@@ -346,7 +343,15 @@ dialog:has(.creative-dialog) { width: min(855px, calc(100vw - 42px)); max-height
 .gateway-reachable { color: var(--ok); }
 .gateway-issue { color: var(--danger); }
 .empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
-.ai-gateway-bar { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.ai-request { display: grid; gap: 7px; margin-block: 10px; padding-block: 9px; border-block: 1px solid var(--line); }
+.ai-request-target, .ai-request-model { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.ai-request-target button { margin-left: auto; }
+.ai-request-url { font-size: 13px; overflow-wrap: anywhere; min-width: 0; }
+.ai-request-model .field { margin: 0; flex: 1 1 12rem; max-width: 24rem; }
+.ai-request-model > button { align-self: end; min-height: 34px; }
+.ai-request-scope { font-size: 12px; color: var(--muted); }
+.ai-request .prompt-settings { margin: 0; }
+.ai-request .prompt-settings pre { max-height: 14rem; overflow: auto; overflow-wrap: anywhere; }
 .ai-settings-form { display: grid; gap: 12px; }
 .ai-settings-form .field { margin-top: 0; }
 .ai-models-chips { display: flex; flex-wrap: wrap; gap: 6px; }

@@ -8,9 +8,10 @@ import { z } from 'zod'
 import type { RenderProgress, RenderResult, Reply } from '../shared/api'
 import { extensions, folderNameSchema, idSchema, mediaTargetSchema, mutationSchema } from '../shared/model'
 import { detailKindSchema, detailTextSchema, frameSpec, generationKindSchema, generationPresets, generationToolUrl } from '../shared/creative'
-import { aiGatewayConfigSchema, aiInstructionSchema, magpieModelSchema, magpieScriptSchema } from '../shared/plan'
+import { aiBaseUrlSchema, aiGatewayConfigSchema, aiInstructionSchema, aiRequestTargetSchema, magpieScriptSchema } from '../shared/plan'
 import { magpiePlanningPrompt, scriptAiPrompt, shotDetailAiPrompt } from '../shared/prompts'
 import { generateAiTextDraft, generateMagpiePlan, testAiGateway } from './magpie'
+import { describeAiGateway } from './ai-gateway'
 import { mediaResponse } from './media-protocol'
 import { exportDestination, renderEpisode, writeEpisodeSrt } from './render'
 import { fillSample, fillVerticalSample } from './sample'
@@ -65,6 +66,12 @@ async function writableProject(win: BrowserWindow, key: unknown) {
 
 function exportLabel(title: string) {
   return title.replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ').replace(/[. ]+$/, '').slice(0, 80)
+}
+
+function aiRequestTarget(input: unknown) {
+  const target = aiRequestTargetSchema.parse(input)
+  if (target.baseUrl !== recent.aiGateway.baseUrl) throw new Error('AI 网关设置已变化，请重新打开生成面板')
+  return target
 }
 
 function diagnose(error: unknown) {
@@ -204,27 +211,32 @@ function wire() {
     }
   }
   handle('ai:get-config', () => recent.aiGateway)
-  handle('ai:set-config', (_win, input) => recent.setAiGateway(aiGatewayConfigSchema.parse(input)))
+  handle('ai:set-config', (_win, input) => workbench.serial(() => recent.setAiGateway(aiGatewayConfigSchema.parse(input))))
+  handle('ai:describe-target', async (_win, input) => {
+    const baseUrl = aiBaseUrlSchema.parse(input)
+    if (baseUrl !== recent.aiGateway.baseUrl) throw new Error('AI 网关设置已变化，请重新打开生成面板')
+    return describeAiGateway(baseUrl)
+  })
   handle('ai:test-connection', (_win, input) => workbench.serial(async () => {
     const config = aiGatewayConfigSchema.parse(input)
     return testAiGateway(config.baseUrl, new AbortController().signal)
   }))
-  handle('plan:generate-magpie', (_win, key, episodeInput, modelInput, scriptInput) => workbench.serial(async () => {
+  handle('plan:generate-magpie', (_win, key, episodeInput, targetInput, scriptInput) => workbench.serial(async () => {
     const store = workbench.getStore(key)
     const episodeId = idSchema.nullable().parse(episodeInput)
-    const model = magpieModelSchema.parse(modelInput)
+    const { baseUrl, model, network } = aiRequestTarget(targetInput)
     const script = magpieScriptSchema.parse(scriptInput)
     const project = store.snapshot
     const episode = episodeId ? findEpisode(project, episodeId) : undefined
     if (!episode && project.episodes.length) throw new Error('请先选择要生成分镜的集数')
     return runCancellableAi(key, async signal => {
-      const draft = await generateMagpiePlan(model, magpiePlanningPrompt(project, episode, script), signal, recent.aiGateway.baseUrl)
+      const draft = await generateMagpiePlan(model, magpiePlanningPrompt(project, episode, script), signal, baseUrl, { network })
       if (!draft || signal.aborted) return null
       const staged = episode ? { shots: draft.shots } : { title: draft.title, shots: draft.shots, script }
       return await store.previewPlan(episodeId, JSON.stringify({ schemaVersion: 1, episode: staged }), 'magpie')
     })
   }))
-  handle('ai:generate-shot-detail', (_win, key, episodeInput, shotInput, kindInput, bodyInput, instructionInput) => workbench.serial(async () => {
+  handle('ai:generate-shot-detail', (_win, key, episodeInput, shotInput, kindInput, targetInput, bodyInput, instructionInput) => workbench.serial(async () => {
     const store = workbench.getStore(key)
     const episodeId = idSchema.parse(episodeInput)
     const shotId = idSchema.parse(shotInput)
@@ -234,12 +246,12 @@ function wire() {
     const project = store.snapshot
     const episode = findEpisode(project, episodeId)
     const shot = findShot(project, episodeId, shotId)
-    const { baseUrl, model } = recent.aiGateway
+    const { baseUrl, model, network } = aiRequestTarget(targetInput)
     return runCancellableAi(key, signal => generateAiTextDraft(
-      model, shotDetailAiPrompt(project, episode, shot, kind, body, instruction), signal, baseUrl,
+      model, shotDetailAiPrompt(project, episode, shot, kind, body, instruction), signal, baseUrl, { network },
     ))
   }))
-  handle('ai:generate-script', (_win, key, scopeInput, episodeInput, scriptInput, instructionInput) => workbench.serial(async () => {
+  handle('ai:generate-script', (_win, key, scopeInput, episodeInput, targetInput, scriptInput, instructionInput) => workbench.serial(async () => {
     const store = workbench.getStore(key)
     const scope = z.enum(['project', 'episode']).parse(scopeInput)
     const episodeId = idSchema.nullable().parse(episodeInput)
@@ -248,9 +260,9 @@ function wire() {
     const project = store.snapshot
     const episode = scope === 'episode' ? (episodeId ? findEpisode(project, episodeId) : undefined) : undefined
     if (scope === 'episode' && !episode) throw new Error('请先选择要辅助编写的集数')
-    const { baseUrl, model } = recent.aiGateway
+    const { baseUrl, model, network } = aiRequestTarget(targetInput)
     return runCancellableAi(key, signal => generateAiTextDraft(
-      model, scriptAiPrompt(project, scope, episode, script, instruction), signal, baseUrl,
+      model, scriptAiPrompt(project, scope, episode, script, instruction), signal, baseUrl, { network },
     ))
   }))
   handle('plan:cancel-generation', (_win, key) => {

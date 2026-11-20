@@ -76,23 +76,51 @@ export const aiGatewayPresets: Record<AiPreset, { label: string; baseUrl: string
   lmstudio: { label: 'LM Studio', baseUrl: 'http://127.0.0.1:1234/v1', defaultModel: 'local-model' },
   custom: { label: '自定义兼容网关', baseUrl: magpieBaseUrl, defaultModel: magpieDefaultModel },
 }
-export const aiBaseUrlSchema = z.string().trim().min(1, '请输入网关地址').max(500, '网关地址最多 500 个字符')
+
+const aiNetworkSchema = z.enum(['loopback', 'lan'])
+export type AiNetwork = z.infer<typeof aiNetworkSchema>
+
+// WHATWG URL canonicalizes IP literals before this check, including short IPv4 forms.
+export function aiIpNetwork(host: string): AiNetwork | 'blocked' | undefined {
+  if (host.startsWith('[')) {
+    if (host === '[::1]') return 'loopback'
+    return /^\[f[cd][0-9a-f]{2}:/.test(host) ? 'lan' : 'blocked'
+  }
+  if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) return
+  const [first, second] = host.split('.').map(Number)
+  if (first === 127) return 'loopback'
+  if (first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168)) return 'lan'
+  return 'blocked'
+}
+
+const aiUrlFormatError = '请输入 HTTP 或 HTTPS 网关地址（不含凭据、查询串或片段）'
+const aiUrlLengthError = '网关地址最多 500 个字符'
+export const aiBaseUrlSchema = z.string().trim().min(1, '请输入网关地址').max(500, aiUrlLengthError)
   .refine(value => !/[\x00-\x1f\x7f]/.test(value), '网关地址不能包含控制字符')
-  .transform(value => value.replace(/\/+$/, ''))
-  .refine(value => {
+  .regex(/^https?:\/\/[^/@\\?#]+(?:\/[^\\?#]*)?$/i, aiUrlFormatError)
+  .transform((value, context) => {
     try {
       const url = new URL(value)
-      return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password && !url.search && !url.hash
+      if (aiIpNetwork(url.hostname) === 'blocked') {
+        context.addIssue({ code: 'custom', message: 'AI 网关仅允许本机或局域网地址' })
+        return z.NEVER
+      }
+      return url.href.replace(/\/+$/, '')
     } catch {
-      return false
+      context.addIssue({ code: 'custom', message: aiUrlFormatError })
+      return z.NEVER
     }
-  }, '请输入有效的 http:// 或 https:// 网关地址（不含账号密码）')
+  })
+  .pipe(z.string().max(500, aiUrlLengthError))
 export const aiGatewayConfigSchema = z.object({
   preset: aiPresetSchema,
   baseUrl: aiBaseUrlSchema,
   model: magpieModelSchema,
 })
 export type AiGatewayConfig = z.infer<typeof aiGatewayConfigSchema>
+export const aiRequestTargetSchema = aiGatewayConfigSchema.pick({ baseUrl: true, model: true }).extend({ network: aiNetworkSchema })
+export type AiRequestTarget = z.infer<typeof aiRequestTargetSchema>
+export const aiCompletionUrl = (baseUrl: string) => `${baseUrl}/chat/completions`
 export const defaultAiGatewayConfig: AiGatewayConfig = {
   preset: 'magpie',
   baseUrl: magpieBaseUrl,

@@ -129,6 +129,10 @@ export function savedShotPrompt(project: Project, shot: Shot, kind: 'image' | 'f
 const returnSchema = JSON.stringify(z.toJSONSchema(externalPlanSchema), null, 2)
 const magpieReturnSchema = JSON.stringify(z.toJSONSchema(magpiePlanSchema))
 
+export function aiRequestBody(model: string, prompt: string) {
+  return { model, messages: [{ role: 'user', content: prompt }], stream: false }
+}
+
 export function magpiePlanningPrompt(project: Project, episode: Episode | undefined, script: string) {
   const brief = project.brief
   const tools = brief?.generation
