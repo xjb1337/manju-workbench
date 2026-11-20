@@ -402,3 +402,7 @@ dialog:has(.creative-dialog) { width: min(855px, calc(100vw - 42px)); max-height
     background: transparent;
   }
 }
+
+.music-name { overflow-wrap: anywhere; }
+.music-toggle { display: flex; align-items: center; gap: 6px; margin: 10px 0; }
+.music-actions { flex-wrap: wrap; }

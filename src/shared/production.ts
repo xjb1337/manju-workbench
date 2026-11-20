@@ -1,5 +1,5 @@
 import { shotMethod, usesFinishedVideo, usesTrack } from './creative'
-import { activeVersion, kinds, shotMedia, shotVisual, type Episode, type MediaKind, type Project, type Shot } from './model'
+import { activeVersion, audibleMusic, kinds, shotMedia, shotVisual, type Episode, type MediaKind, type Project, type Shot } from './model'
 
 export const productionSteps = [
   { id: 'script', label: '剧本' },
@@ -97,5 +97,6 @@ export function exportInputsChanged(before: Episode, after: Episode, beforeProje
     return [shot.id, shot.frames, shot.dialogue, embeddedAudio,
       ...kinds.map(kind => [shot.media[kind].activeId, shotMedia(shot, kind, method)?.id])]
   }
-  return JSON.stringify(before.shots.map(shot => inputs(shot, beforeProject))) !== JSON.stringify(after.shots.map(shot => inputs(shot, afterProject)))
+  return JSON.stringify(audibleMusic(before)) !== JSON.stringify(audibleMusic(after))
+    || JSON.stringify(before.shots.map(shot => inputs(shot, beforeProject))) !== JSON.stringify(after.shots.map(shot => inputs(shot, afterProject)))
 }

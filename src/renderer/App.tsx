@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ArrowSquareOut, Broom, Check, FilmSlate, FolderOpen, Moon, Plus, SlidersHorizontal, Sparkle, Sun, WarningCircle, X } from '@phosphor-icons/react'
 import type { OpenProject, OrphanMediaPreview, RecentProject, RenderProgress, Reply, ReplyError } from '../shared/api'
 import { frameSpec, generationLabels, generationToolName, shotMethod, workTypeLabels, type DetailKind, type GenerationKind } from '../shared/creative'
-import { folderNameSchema, type MediaTarget, type Mutation, type Project, type Track } from '../shared/model'
+import { folderNameSchema, type ImportTarget, type MediaTarget, type Mutation, type Project, type Track } from '../shared/model'
 import { defaultAiGatewayConfig, type AiGatewayConfig } from '../shared/plan'
 import { exportFallbacks, productionProgress, type StepId } from '../shared/production'
 import { legacyDetail, savedShotPrompt } from '../shared/prompts'
@@ -10,6 +10,7 @@ import { AiSettingsDialog, sameGateway, ScriptAiDialog, type AiPanelOptions, typ
 import { Badge, Modal, NameModal, PreviewPlayer, kindLabel, sequence } from './components'
 import { BriefPanel, DetailDialog, PlanImportDialog, PlanningDialog } from './CreativePanels'
 import { Inspector } from './Inspector'
+import { MusicPanel } from './MusicPanel'
 import { ProductionGuide, isShotStep } from './ProductionGuide'
 import { ShotStage } from './ShotStage'
 import { UpdatePanel } from './UpdatePanel'
@@ -58,6 +59,7 @@ export function App() {
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState<RenderProgress | null>(null)
   const [player, setPlayer] = useState('')
+  const [musicOpen, setMusicOpen] = useState(false)
   const [message, setMessage] = useState<{ text: string; error?: boolean } | null>(null)
   const [ask, setAsk] = useState<Ask | null>(null)
   const [upgradeRequest, setUpgradeRequest] = useState<string | null>(null)
@@ -148,7 +150,7 @@ export function App() {
     shotIndex,
     busy,
     dirty,
-    hasModalOpen: Boolean(ask || creativeDialog || progress || player || aiSettingsOpen || scriptAi),
+    hasModalOpen: Boolean(ask || creativeDialog || progress || player || aiSettingsOpen || scriptAi || musicOpen),
     onSelectShot: selectShot,
   })
 
@@ -202,6 +204,7 @@ export function App() {
     setTab('shots')
     setGuideStep(null)
     setCreativeDialog(null)
+    setMusicOpen(false)
     setMagpieSeedScript(null)
     setScriptAi(null)
     setScriptScope('project')
@@ -228,7 +231,7 @@ export function App() {
     })
   }
 
-  function importMedia(target: MediaTarget) {
+  function importMedia(target: ImportTarget) {
     if (opened) void run(() => api.importMedia(opened.mediaKey, target), accept)
   }
   function activate(target: MediaTarget, id: string) {
@@ -535,7 +538,7 @@ export function App() {
           }} />
         {tab === 'shots' ? <ShotStage opened={opened} episode={episode} shot={shot} shotIndex={shotIndex} spec={spec}
           method={method} busy={busy} canRender={canRender} playerOpen={Boolean(player)}
-          onOpenEpisodeScript={() => goToScript('episode')}
+          onOpenEpisodeScript={() => goToScript('episode')} onMusic={() => { setMessage(null); setMusicOpen(true) }}
           onPreview={() => void render('preview')} onRebuildPreview={() => void render('preview', true)} onExport={requestExport} onExportSrt={exportSrt}
           onAddPrimary={() => episode ? addShot() : addEpisode()}
           hasScript={hasScript} onWriteScript={writeScript} onMagpie={() => openMagpieDialog()}
@@ -644,7 +647,7 @@ export function App() {
       {message?.error && <p className="inline-error" role="alert">{message.text}</p>}
       <div className="dialog-actions"><button onClick={() => { setAsk(null); setMessage(null) }} disabled={busy}>取消</button>
         <button className="destructive" disabled={busy} onClick={() => void edit(ask.change, () => {
-          if (ask.change.type !== 'media.remove') setDirty(false)
+          if (ask.change.type !== 'media.remove' && ask.change.type !== 'music.remove') setDirty(false)
           setAsk(null)
         })}>删除</button></div>
     </Modal>}
@@ -686,6 +689,16 @@ export function App() {
         <button className="primary" onClick={() => { setAsk(null); void render('export') }}>继续导出</button>
       </div>
     </Modal>}
+    {musicOpen && episode && <MusicPanel key={JSON.stringify(episode.music)} music={episode.music} busy={busy} canPreview={canRender}
+      error={message?.error ? message.text : undefined}
+      onClose={() => { if (!busy) { setMusicOpen(false); setMessage(null) } }}
+      onImport={() => importMedia({ scope: 'music', episodeId: episode.id })}
+      onSave={settings => void edit({ type: 'music.edit', episodeId: episode.id, settings })}
+      onRemove={() => {
+        setMusicOpen(false)
+        remove('移除背景音乐', episode.music!.version.name, { type: 'music.remove', episodeId: episode.id })
+      }}
+      onPreview={() => { setMusicOpen(false); void render('preview') }} />}
     {progress && <Modal title={progress.mode === 'preview' ? '生成顺序预览' : '导出 MP4'} onClose={() => void api.cancelRender()}>
       <p className="render-spec">{spec.ratio} · {spec.width} × {spec.height} · 30 fps</p>
       <div className="progress-line"><progress max={100} value={progress.percent} /><span>{progress.percent}%</span></div>

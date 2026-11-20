@@ -26,6 +26,7 @@ export function ShotStage({
   canRender,
   playerOpen,
   onOpenEpisodeScript,
+  onMusic,
   onPreview,
   onRebuildPreview,
   onExport,
@@ -53,6 +54,7 @@ export function ShotStage({
   canRender: boolean
   playerOpen: boolean
   onOpenEpisodeScript: () => void
+  onMusic: () => void
   onPreview: () => void
   onRebuildPreview: () => void
   onExport: () => void
@@ -99,6 +101,7 @@ export function ShotStage({
         <span className="stage-count">{episode.shots.length} 镜头 <span>·</span> {timecode(totalFrames(episode))}</span>
         <button className="icon small subtle" title="集数剧本" aria-label="集数剧本" disabled={busy}
           onClick={onOpenEpisodeScript}><FileText size={17} /></button>
+        <button className="subtle" disabled={busy} onClick={onMusic}>背景音乐</button>
       </>}</div>
       {shot && <div className="actions stage-render-actions">
         <span className="export-size">{spec.width} × {spec.height}</span>

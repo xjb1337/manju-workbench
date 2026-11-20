@@ -1,13 +1,12 @@
 import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
 import { copyFile, link, lstat, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { availableParallelism, tmpdir } from 'node:os'
 import path from 'node:path'
-import { shotMedia, shotVisual, folderNameSchema, totalFrames, type Episode, type Shot } from '../shared/model'
+import { audibleMusic, shotMedia, shotVisual, folderNameSchema, totalFrames, type Episode, type Shot } from '../shared/model'
 import { frameSpec, shotMethod, usesFinishedVideo, type FrameSpec, type ShotMethod } from '../shared/creative'
 import type { Project } from '../shared/model'
 import { mediaInput, probe, runTool } from './process'
-import { checkedFile, type ProjectStore } from './storage'
+import { checkedFile, fileFingerprint, type ProjectStore } from './storage'
 
 const fps = 30
 const sampleRate = 48_000
@@ -225,7 +224,7 @@ async function resolveShotInputs(store: ProjectStore, project: Project, shot: Sh
 }
 
 /** Computes a deterministic SHA-256 key covering all inputs that affect a shot's rendered output. */
-async function shotCacheKey(spec: FrameSpec, shot: Shot, inputs: ShotInputs, signal: AbortSignal) {
+async function shotCacheKey(spec: FrameSpec, shot: Shot, inputs: ShotInputs, duckTrack: boolean, signal: AbortSignal) {
   const { method, visual, voice, embeddedAudio, visualPath, voicePath } = inputs
   const visualHash = visualPath && await fileFingerprint(visualPath, signal)
   const voiceHash = voicePath && await fileFingerprint(voicePath, signal)
@@ -256,14 +255,8 @@ async function shotCacheKey(spec: FrameSpec, shot: Shot, inputs: ShotInputs, sig
       hash: voiceHash,
     } : null,
     embeddedAudio,
+    ...(duckTrack && { duckTrack }),
   })).digest('hex')
-}
-
-async function fileFingerprint(file: string, signal: AbortSignal) {
-  const hash = createHash('sha256')
-  for await (const chunk of createReadStream(file, { signal })) hash.update(chunk)
-  signal.throwIfAborted()
-  return hash.digest('hex')
 }
 
 async function linkOrCopy(source: string, target: string) {
@@ -313,6 +306,7 @@ async function encodeShot(
   cwd: string,
   spec: FrameSpec,
   inputs: ShotInputs,
+  duckTrack: boolean,
   signal: AbortSignal,
   onProgress?: (ratio: number) => void,
 ) {
@@ -338,13 +332,19 @@ async function encodeShot(
     ...(caption ? [`subtitles=${captionFile}`] : []),
   ].join(',')
   const audioFilter = `aresample=${sampleRate}:first_pts=0,asetpts=N/SR/TB,apad,atrim=end_sample=${shot.frames * (sampleRate / fps)}`
+  const audioInput = embeddedAudio ? '0:a:0' : '1:a:0'
+  // Only independently imported narration controls the gain. Picture sound stays in the dry mix.
+  const audioOutput = duckTrack ? [
+    '-filter_complex', `[${audioInput}]${audioFilter},asplit[dry][detector];[detector]aformat=channel_layouts=mono${voice ? '' : ',volume=0'}[duck]`,
+    '-map', '[dry]', '-map', '[duck]', '-ac:a:1', '1',
+  ] : ['-map', audioInput, '-af', audioFilter]
   const totalUs = (shot.frames / fps) * 1_000_000
   await runTool('ffmpeg', [
     '-nostdin', '-v', 'error', '-xerror', '-progress', 'pipe:1', '-filter_threads', '2', ...visualArgs, ...audioArgs,
-    '-map', '0:V:0', '-map', embeddedAudio ? '0:a:0' : '1:a:0', '-vf', videoFilter, '-af', audioFilter,
+    '-map', '0:V:0', '-vf', videoFilter, ...audioOutput,
     '-c:v', 'libx264', '-threads:v', '3', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
     '-bf', '0', '-video_track_timescale', '30000', '-color_range', 'tv', '-colorspace', 'bt709',
-    '-c:a', 'pcm_s16le', '-ar', String(sampleRate), '-ac', '2', '-map_metadata', '-1', '-map_chapters', '-1',
+    '-c:a', 'pcm_s16le', '-ar', String(sampleRate), '-ac:a:0', '2', '-map_metadata', '-1', '-map_chapters', '-1',
     '-f', 'mov', file,
   ], {
     cwd,
@@ -391,6 +391,24 @@ export async function writeEpisodeSrt(destination: string, episode: Episode, spe
   }
 }
 
+function musicMix(music: NonNullable<Episode['music']>, frames: number) {
+  const samples = frames * (sampleRate / fps)
+  const fadeIn = Math.min(samples, Math.round(music.fadeIn * sampleRate))
+  const fadeOut = Math.min(samples, Math.round(music.fadeOut * sampleRate))
+  const musicFilters = [
+    `aresample=${sampleRate}:first_pts=0`, 'asetpts=N/SR/TB', 'aformat=channel_layouts=stereo',
+    `atrim=end_sample=${samples}`,
+    ...(fadeIn ? [`afade=t=in:ns=${fadeIn}`] : []),
+    ...(fadeOut ? [`afade=t=out:ss=${samples - fadeOut}:ns=${fadeOut}`] : []),
+    `volume=${music.volume}`,
+  ]
+  return [
+    `[1:a:0]${musicFilters.join(',')}[music]`,
+    '[music][0:a:1]sidechaincompress=threshold=0.009:ratio=12:attack=15:release=250:makeup=1[ducked]',
+    `[0:a:0][ducked]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.97:level=false:latency=true,apad,atrim=end_sample=${samples}[mix]`,
+  ].join(';')
+}
+
 export async function renderEpisode(
   store: ProjectStore,
   episode: Episode,
@@ -407,6 +425,9 @@ export async function renderEpisode(
     workDir = await mkdtemp(path.join(tmpdir(), 'manju-render-work-'))
     publishDir = await mkdtemp(path.join(path.dirname(destination), '.manju-render-'))
     const total = totalFrames(episode)
+    const music = audibleMusic(episode)
+    const musicPath = music && await store.assetPath(music.version)
+    const musicHash = musicPath && await fileFingerprint(musicPath, options.signal)
     const files = episode.shots.map((_, i) => `shot-${i}.mov`)
     const shotProgress = new Array<number>(episode.shots.length).fill(0)
     const batchController = new AbortController()
@@ -434,9 +455,9 @@ export async function renderEpisode(
           batchSignal.throwIfAborted()
           const inputs = await resolveShotInputs(store, project, shot, batchSignal)
           const cacheDir = options.cacheDir
-          const hash = cacheDir && await shotCacheKey(spec, shot, inputs, batchSignal)
+          const hash = cacheDir && await shotCacheKey(spec, shot, inputs, !!music, batchSignal)
           const workFile = path.join(workDir!, files[i])
-          const encode = () => encodeShot(store, shot, i, files[i], workDir!, spec, inputs, batchSignal, ratio => {
+          const encode = () => encodeShot(store, shot, i, files[i], workDir!, spec, inputs, !!music, batchSignal, ratio => {
             shotProgress[i] = Math.max(shotProgress[i], ratio)
             reportProgress()
           })
@@ -445,7 +466,7 @@ export async function renderEpisode(
             const useOrFill = async () => {
               if (await tryUseShotCache(path.join(cacheDir, hash), workFile, batchSignal)) return
               await encode()
-              const afterEncode = await shotCacheKey(spec, shot, inputs, batchSignal).catch(() => undefined)
+              const afterEncode = await shotCacheKey(spec, shot, inputs, !!music, batchSignal).catch(() => undefined)
               if (afterEncode === hash) await writeShotCache(workFile, cacheDir, hash, batchSignal)
             }
             const fill = useOrFill()
@@ -484,7 +505,13 @@ export async function renderEpisode(
     await runTool('ffmpeg', [
       '-nostdin', '-v', 'error', '-xerror', '-protocol_whitelist', 'file,pipe',
       '-f', 'concat', '-safe', '1', '-i', 'episode.ffconcat',
-      '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+      ...(music && musicPath ? ['-stream_loop', '-1', ...mediaInput(musicPath, music.version.extension)] : []),
+      '-map', '0:v:0',
+      ...(music ? [
+        '-filter_complex_threads', '2', '-filter_complex', musicMix(music, total), '-map', '[mix]',
+        '-t', seconds(total),
+      ] : ['-map', '0:a:0']),
+      '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
       '-map_metadata', '-1', '-map_chapters', '-1', '-movflags', '+faststart', '-f', 'mp4', complete,
     ], { cwd: workDir, signal: options.signal })
     const info = await probe(complete, 'mp4', options.signal)
@@ -495,12 +522,14 @@ export async function renderEpisode(
       throw new Error('成片的音视频轨或时长校验失败')
     }
     await checkedFile(complete)
+    if (musicPath && await fileFingerprint(musicPath, options.signal) !== musicHash) throw new Error('渲染期间背景音乐文件已变化')
     const handle = await open(complete, 'r+')
     try { await handle.sync() } finally { await handle.close() }
     options.signal.throwIfAborted()
     options.publish?.()
     await renameWithRetry(complete, destination)
     options.progress?.(100)
+    return { musicHash }
   } finally {
     if (workDir) await rm(workDir, { recursive: true, force: true }).catch(() => {})
     if (publishDir) await rm(publishDir, { recursive: true, force: true }).catch(() => {})

@@ -6,7 +6,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { z } from 'zod'
 import type { RenderProgress, RenderResult, Reply } from '../shared/api'
-import { extensions, folderNameSchema, idSchema, mediaTargetSchema, mutationSchema } from '../shared/model'
+import { extensions, folderNameSchema, idSchema, importTargetSchema, mediaTargetSchema, mutationSchema } from '../shared/model'
 import { detailKindSchema, detailTextSchema, frameSpec, generationKindSchema, generationPresets, generationToolUrl } from '../shared/creative'
 import { aiBaseUrlSchema, aiGatewayConfigSchema, aiInstructionSchema, aiRequestTargetSchema, magpieScriptSchema } from '../shared/plan'
 import { magpiePlanningPrompt, scriptAiPrompt, shotDetailAiPrompt } from '../shared/prompts'
@@ -272,9 +272,9 @@ function wire() {
   handle('plan:merge', (win, key, token, replacements) => workbench.serial(async () => (await writableProject(win, key)).mergePlan(token, replacements)))
   handle('project:import', (win, key, input) => workbench.serial(async () => {
     const store = workbench.getStore(key)
-    const target = mediaTargetSchema.parse(input)
-    const kind = target.scope === 'shot' ? target.kind : 'image'
-    const label = { image: '参考图', video: '视频', audio: '配音' }[kind]
+    const target = importTargetSchema.parse(input)
+    const kind = target.scope === 'shot' ? target.kind : target.scope === 'music' ? 'audio' : 'image'
+    const label = target.scope === 'music' ? '背景音乐' : { image: '参考图', video: '视频', audio: '配音' }[kind]
     const selected = await dialog.showOpenDialog(win, { title: `导入${label}`, properties: ['openFile'],
       defaultPath: await recent.defaultDirectory('media', store.root), filters: [{ name: label, extensions: extensions[kind] }] })
     if (selected.canceled || !selected.filePaths[0]) return null
@@ -350,12 +350,12 @@ function wire() {
       }
       if (mode === 'preview' && rebuild) await workbench.dropShotCache()
       const cacheDir = await workbench.ensureShotCache()
-      await renderEpisode(store, episode, target, {
+      const { musicHash } = await renderEpisode(store, episode, target, {
         signal, progress, project: projectSnapshot, cacheDir, publish: () => { state.publishing = true },
       })
       if (!previewDir) {
         try {
-          const project = await store.recordExport(episode, frameSpec(projectSnapshot).ratio, projectSnapshot)
+          const project = await store.recordExport(episode, frameSpec(projectSnapshot).ratio, projectSnapshot, musicHash)
           return { status: 'completed', mode: 'export', location: target, project }
         } catch (error) {
           // The validated MP4 has been published. Report the separate project write failure.

@@ -1,4 +1,4 @@
-import type { MediaTarget, Mutation, Project } from './model'
+import type { ImportTarget, MediaTarget, Mutation, Project } from './model'
 import type { DetailKind, GenerationKind } from './creative'
 
 import type { AiConnectionTestResult, AiGatewayConfig, AiNetwork, AiRequestTarget, PlanPreview } from './plan'
@@ -54,7 +54,7 @@ export interface Workbench {
   describeAiTarget(baseUrl: string): Promise<Reply<AiNetwork>>
   testAiConnection(config: AiGatewayConfig): Promise<Reply<AiConnectionTestResult>>
   mergePlan(key: string, token: string, replacements: string[]): Promise<Reply<Project>>
-  importMedia(key: string, target: MediaTarget): Promise<Reply<Project | null>>
+  importMedia(key: string, target: ImportTarget): Promise<Reply<Project | null>>
   importDroppedMedia(key: string, target: MediaTarget, file: File): Promise<Reply<Project | null>>
   inspectOrphanMedia(key: string): Promise<Reply<OrphanMediaPreview>>
   cancelOrphanMedia(key: string, token: string): Promise<Reply<null>>
