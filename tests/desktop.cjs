@@ -173,6 +173,30 @@ async function verifyScriptDraft(folder) {
     assert.equal(await app.evaluate(({ clipboard }) => clipboard.readText()), draft)
     assert.equal(await hash(file), saved)
     await page.locator('footer').getByText('有未保存修改', { exact: true }).waitFor()
+
+    const orphan = path.join(store.root, 'media', '未确认素材.txt')
+    const added = path.join(store.root, 'media', '后加入素材.txt')
+    await writeFile(orphan, 'orphan')
+    const cleanup = page.getByRole('dialog', { name: '清理未用素材', exact: true })
+    await button(page, '清理未用素材').click()
+    await button(cleanup, '取消').click()
+    assert.equal(await readFile(orphan, 'utf8'), 'orphan')
+    await button(page, '清理未用素材').click()
+    await cleanup.getByText('候选文件', { exact: true }).click()
+    await cleanup.getByText(path.basename(orphan), { exact: true }).waitFor()
+    await writeFile(added, 'added after preview')
+    await button(cleanup, '确认清理').click()
+    await cleanup.getByRole('alert').getByText(/重新预览/).waitFor()
+    assert.equal(await readFile(orphan, 'utf8'), 'orphan')
+    assert.equal(await readFile(added, 'utf8'), 'added after preview')
+    await screenshot(page, 'feature-cleanup-preview-stale.png')
+    await button(cleanup, '重新预览').click()
+    await cleanup.getByText(/发现 2 个未引用素材/).waitFor()
+    await button(cleanup, '确认清理').click()
+    await cleanup.waitFor({ state: 'hidden' })
+    assert.deepEqual(await readdir(path.dirname(orphan)), [])
+    assert.equal(await hash(file), saved)
+    assert.equal(await editor.inputValue(), draft)
   } finally {
     await app.close()
   }
@@ -1320,6 +1344,7 @@ async function main() {
       updateFixtureNativeConfirmationCanceledAndDirtyBlocked: true,
       magpieDraftCancellationErrorAndConflictReview: true,
       handwrittenAndAiScriptDraftsPreserved: true, scriptConflictKeepsDraftAndClipboard: true,
+      orphanConfirmationChangedAndRepreviewed: true,
       legacyUpgradeCancellationPreservedSource: true, legacyUpgradeCopiedMedia: true,
       voiceDialogueConfirmedAndSrtExported: true, previewRebuildReplacedSessionCache: true,
       emptyProjectPrimaryActionChangedAfterScript: true, briefScrollLabelVisibleAtMinimumSize: true,

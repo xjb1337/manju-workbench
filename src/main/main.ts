@@ -16,7 +16,7 @@ import { exportDestination, renderEpisode, writeEpisodeSrt } from './render'
 import { fillSample, fillVerticalSample } from './sample'
 import { RecentProjects, themeSchema, type WindowBounds } from './recent-projects'
 import { WorkbenchSession } from './session'
-import { findEpisode, findShot, ProjectConflictError, ProjectStore } from './storage'
+import { findEpisode, findShot, OrphanMediaPreviewError, ProjectConflictError, ProjectStore } from './storage'
 import { cleanupStaleTempDirs, staleTempAgeMs, staleTempPrefixes } from './temp-cleanup'
 import { createProductionUpdater } from './update-system'
 import { InvalidUpdatePackageError, ManualUpdateRequiredError, type Updater } from './updater'
@@ -93,6 +93,7 @@ function handle<T>(channel: string, fn: (win: BrowserWindow, ...args: unknown[])
     } catch (error) {
       if (error instanceof UpgradeCanceled) return { ok: false, error: '已取消升级', code: 'upgrade-canceled' }
       if (error instanceof ProjectConflictError) return { ok: false, error: error.message, code: 'project-conflict' }
+      if (error instanceof OrphanMediaPreviewError) return { ok: false, error: error.message, code: 'orphan-preview-stale' }
       console.error(channel, error)
       if (error instanceof ManualUpdateRequiredError) return { ok: false, error: error.message, code: 'update-manual-required' }
       if (error instanceof InvalidUpdatePackageError) return { ok: false, error: error.message, code: 'update-package-invalid' }
@@ -277,7 +278,8 @@ function wire() {
     return project
   }))
   handle('media:inspect-orphans', (_win, key) => workbench.serial(() => workbench.getStore(key).inspectOrphanMedia()))
-  handle('media:clean-orphans', (win, key) => workbench.serial(async () => (await writableProject(win, key)).cleanOrphanMedia()))
+  handle('media:cancel-orphans', (_win, key, token) => workbench.serial(() => workbench.getStore(key).cancelOrphanMedia(token)))
+  handle('media:clean-orphans', (win, key, token) => workbench.serial(async () => (await writableProject(win, key)).cleanOrphanMedia(token)))
   handle('app:copy', (_win, text) => {
     clipboard.writeText(z.string().max(64 * 1024 * 1024).parse(text))
     return null

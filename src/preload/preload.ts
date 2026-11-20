@@ -43,7 +43,8 @@ const bridge: Workbench = {
     return ipcRenderer.invoke('project:import-dropped', key, target, filePath)
   },
   inspectOrphanMedia: key => ipcRenderer.invoke('media:inspect-orphans', key),
-  cleanOrphanMedia: key => ipcRenderer.invoke('media:clean-orphans', key),
+  cancelOrphanMedia: (key, token) => ipcRenderer.invoke('media:cancel-orphans', key, token),
+  cleanOrphanMedia: (key, token) => ipcRenderer.invoke('media:clean-orphans', key, token),
   copy: text => ipcRenderer.invoke('app:copy', text),
   openTool: (key, tool) => ipcRenderer.invoke('app:open-tool', key, tool),
   render: (key, episodeId, mode, rebuild) => ipcRenderer.invoke('episode:render', key, episodeId, mode, rebuild),

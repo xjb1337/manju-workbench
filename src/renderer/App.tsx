@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ArrowSquareOut, Broom, Check, FilmSlate, FolderOpen, Moon, Plus, SlidersHorizontal, Sparkle, Sun, WarningCircle, X } from '@phosphor-icons/react'
-import type { OpenProject, RecentProject, RenderProgress, Reply, ReplyError } from '../shared/api'
+import type { OpenProject, OrphanMediaPreview, RecentProject, RenderProgress, Reply, ReplyError } from '../shared/api'
 import { frameSpec, generationLabels, generationToolName, shotMethod, workTypeLabels, type DetailKind, type GenerationKind } from '../shared/creative'
 import { folderNameSchema, type MediaTarget, type Mutation, type Project, type Track } from '../shared/model'
 import { defaultAiGatewayConfig, type AiGatewayConfig } from '../shared/plan'
@@ -21,7 +21,7 @@ type EditorField = 'shot-prompt' | 'shot-video-prompt' | 'shot-dialogue' | 'scri
 type Ask =
   | { kind: 'name'; title: string; initial?: string; confirm: string; action: (name: string) => Promise<boolean> }
   | { kind: 'remove'; title: string; name: string; change: Mutation }
-  | { kind: 'clean-orphans'; report: { count: number; bytes: number } }
+  | { kind: 'clean-orphans'; report: OrphanMediaPreview; stale?: boolean }
   | { kind: 'discard'; action: () => void }
   | { kind: 'export'; fallbacks: ReturnType<typeof exportFallbacks> }
 
@@ -250,6 +250,12 @@ export function App() {
   }
   function inspectOrphans() {
     if (opened) void run(() => api.inspectOrphanMedia(opened.mediaKey), report => setAsk({ kind: 'clean-orphans', report }))
+  }
+  function closeOrphanPreview() {
+    if (busy || ask?.kind !== 'clean-orphans') return
+    if (opened) void api.cancelOrphanMedia(opened.mediaKey, ask.report.token).catch(() => {})
+    setAsk(null)
+    setMessage(null)
   }
   function openDetail(kind: DetailKind, shotToEdit = shot) {
     goTo('shots', () => {
@@ -646,18 +652,26 @@ export function App() {
           setAsk(null)
         })}>删除</button></div>
     </Modal>}
-    {ask?.kind === 'clean-orphans' && <Modal title="清理未用素材" onClose={() => { if (!busy) { setAsk(null); setMessage(null) } }}>
-      {ask.report.count === 0
+    {ask?.kind === 'clean-orphans' && <Modal title="清理未用素材" onClose={closeOrphanPreview}>
+      {!ask.stale && (ask.report.count === 0
         ? <p className="orphan-summary">没有未引用的素材文件</p>
-        : <p className="risk"><WarningCircle size={20} />发现 {ask.report.count} 个未引用素材文件（共 {formatBytes(ask.report.bytes)}），清理后无法撤销</p>}
+        : <p className="risk"><WarningCircle aria-hidden="true" size={20} />发现 {ask.report.count} 个未引用素材文件（共 {formatBytes(ask.report.bytes)}），清理后无法撤销</p>)}
+      {ask.report.count > 0 && !ask.stale && <details className="orphan-files" key={ask.report.token}>
+        <summary>候选文件</summary>
+        <ul>{ask.report.files.map(file => <li key={file}>{file}</li>)}</ul>
+      </details>}
       {message?.error && <p className="inline-error" role="alert">{message.text}</p>}
       <div className="dialog-actions">
-        <button type="button" onClick={() => { setAsk(null); setMessage(null) }} disabled={busy}>{ask.report.count === 0 ? '关闭' : '取消'}</button>
-        {ask.report.count > 0 && <button type="button" className="destructive" disabled={busy} onClick={() => {
+        <button type="button" onClick={closeOrphanPreview} disabled={busy}>{ask.report.count === 0 ? '关闭' : '取消'}</button>
+        {ask.stale ? <button type="button" className="primary" disabled={busy} onClick={inspectOrphans}>重新预览</button> :
+          ask.report.count > 0 && <button type="button" className="destructive" disabled={busy} onClick={() => {
           if (!opened) return
-          void run(() => api.cleanOrphanMedia(opened.mediaKey), result => {
+          void run(() => api.cleanOrphanMedia(opened.mediaKey, ask.report.token), result => {
             setAsk(null)
             setMessage({ text: result.count > 0 ? `已清理 ${result.count} 个未引用素材（释放 ${formatBytes(result.bytes)}）` : '没有未引用的素材文件' })
+          }, (text, code) => {
+            if (code === 'orphan-preview-stale') setAsk({ ...ask, stale: true })
+            setMessage({ text, error: true })
           })
         }}>确认清理</button>}
       </div>

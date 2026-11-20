@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import { copyFile, cp, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, rmdir } from 'node:fs/promises'
 import path from 'node:path'
@@ -10,6 +10,7 @@ import {
 import { frameSpec, shotMethod, type Ratio } from '../shared/creative'
 import { shotPromptBody } from '../shared/prompts'
 import type { PlanPreview } from '../shared/plan'
+import type { OrphanMediaPreview } from '../shared/api'
 import { z } from 'zod'
 import { noteCreativeChanges } from './creative-review'
 import { stagePlan } from './plan-import'
@@ -22,6 +23,27 @@ const maxProjectBytes = 32 * 1024 * 1024
 const maxMediaBytes = 4 * 1024 ** 3
 
 export class ProjectConflictError extends Error {}
+export class OrphanMediaPreviewError extends Error {
+  constructor() {
+    super('作品或素材已变化，请重新预览后再清理')
+  }
+}
+
+type OrphanCandidate = { bytes: number; fingerprint: string }
+
+function projectFingerprint(json: string) {
+  return createHash('sha256').update(json).digest('hex')
+}
+
+async function orphanCandidate(file: string): Promise<OrphanCandidate | undefined> {
+  const stats = await lstat(file, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error
+  })
+  if (stats?.isFile()) {
+    const { dev, ino, size, mtimeNs, ctimeNs } = stats
+    return { bytes: Number(size), fingerprint: [dev, ino, size, mtimeNs, ctimeNs].join(':') }
+  }
+}
 
 export async function safeRename(from: string, to: string) {
   for (let attempt = 0; ; attempt++) {
@@ -288,6 +310,7 @@ export function allVersions(project: Project) {
 export class ProjectStore {
   private tail: Promise<unknown> = Promise.resolve()
   private pendingPlan?: { token: string; base: Project; staged: ReturnType<typeof stagePlan> }
+  private pendingCleanup?: { token: string; project: string; candidates: Map<string, OrphanCandidate> }
   private versionIndex = new Map<string, Version>()
 
   private constructor(readonly root: string, private document: Project, private savedJson: string) {
@@ -394,17 +417,7 @@ export class ProjectStore {
     return result
   }
 
-  private async commit(next: Project) {
-    this.assertWritable()
-    noteCreativeChanges(this.document, next)
-    const ratioChanged = frameSpec(this.document).ratio !== frameSpec(next).ratio
-    const previous = new Map(this.document.episodes.map(episode => [episode.id, episode]))
-    for (const episode of next.episodes) {
-      if (!episode.exportRecord || episode.exportRecord.stale) continue
-      const before = previous.get(episode.id)
-      if (before && (ratioChanged || exportInputsChanged(before, episode, this.document, next))) episode.exportRecord.stale = true
-    }
-    const valid = projectSchema.parse({ ...next, schemaVersion: projectSchemaVersion })
+  private async withProjectLock<T>(work: (file: string, assertLock: () => void) => Promise<T>) {
     const file = path.join(this.root, projectFilename)
     let compromised = false
     const release = await lock(file, {
@@ -415,81 +428,129 @@ export class ProjectStore {
       throw error
     })
     try {
-      this.savedJson = await atomicJson(file, valid, async () => {
-        if (await readProjectFile(file) !== this.savedJson || compromised) {
-          throw new ProjectConflictError('磁盘上的作品已变更，请重新打开作品后再保存')
-        }
+      return await work(file, () => {
+        if (compromised) throw new Error('作品锁已失效，请稍后重试')
       })
-      this.document = valid
-      this.rebuildVersionIndex()
-      return this.snapshot
     } finally {
       await release().catch(error => console.error('project:release-lock', error))
     }
   }
 
+  private async assertCurrent(file: string, assertLock: () => void) {
+    if (await readProjectFile(file) !== this.savedJson) {
+      throw new ProjectConflictError('磁盘上的作品已变更，请重新打开作品后再保存')
+    }
+    assertLock()
+  }
+
+  private async commit(next: Project, file: string, assertLock: () => void) {
+    this.assertWritable()
+    noteCreativeChanges(this.document, next)
+    const ratioChanged = frameSpec(this.document).ratio !== frameSpec(next).ratio
+    const previous = new Map(this.document.episodes.map(episode => [episode.id, episode]))
+    for (const episode of next.episodes) {
+      if (!episode.exportRecord || episode.exportRecord.stale) continue
+      const before = previous.get(episode.id)
+      if (before && (ratioChanged || exportInputsChanged(before, episode, this.document, next))) episode.exportRecord.stale = true
+    }
+    const valid = projectSchema.parse({ ...next, schemaVersion: projectSchemaVersion })
+    this.savedJson = await atomicJson(file, valid, () => this.assertCurrent(file, assertLock))
+    this.document = valid
+    this.rebuildVersionIndex()
+    return this.snapshot
+  }
+
   edit(input: unknown) {
     const change = mutationSchema.parse(input)
-    return this.queue(async () => {
+    return this.queue(() => this.withProjectLock(async (file, assertLock) => {
       const next = this.snapshot
       const removedVersion = change.type === 'media.remove' ? this.findVersion(change.versionId) : undefined
       mutate(next, change)
-      const committed = await this.commit(next)
+      const committed = await this.commit(next, file, assertLock)
       if (removedVersion && !this.versionIndex.has(removedVersion.id)) {
-        await this.removeMediaFile(removedVersion)
+        await this.removeMediaFile(removedVersion, assertLock)
       }
       return committed
-    })
+    }))
   }
 
-  private async removeMediaFile(version: Version) {
+  private async removeMediaFile(version: Version, assertLock: () => void) {
     try {
       const directory = await checkedDirectory(path.join(this.root, directoryName))
       const file = path.join(directory, `${version.id}.${version.extension}`)
       const stats = await lstat(file).catch(() => undefined)
+      assertLock()
       if (stats?.isFile()) await rm(file, { force: true })
     } catch {
       // Best-effort cleanup after project metadata has been committed.
     }
   }
 
-  private async scanOrphanMedia(remove: boolean): Promise<{ count: number; bytes: number }> {
+  private async scanOrphanMedia(document: Project) {
     const directory = await checkedDirectory(path.join(this.root, directoryName))
     const normalizeName = (name: string) => (process.platform === 'win32' ? name.toLowerCase() : name)
     const referenced = new Set(
-      Array.from(this.versionIndex.values(), version => normalizeName(`${version.id}.${version.extension}`)),
+      allVersions(document).map(version => normalizeName(`${version.id}.${version.extension}`)),
     )
     const entries = await readdir(directory, { withFileTypes: true })
-    let count = 0
-    let bytes = 0
+    const candidates = new Map<string, OrphanCandidate>()
     for (const entry of entries) {
       if (entry.name.startsWith('.')) continue
       if (referenced.has(normalizeName(entry.name))) continue
-      const file = path.join(directory, entry.name)
-      const stats = await lstat(file).catch(() => undefined)
-      if (!stats?.isFile()) continue
-      if (remove) {
-        try {
-          await rm(file)
-        } catch {
-          continue
-        }
-      }
-      count += 1
-      bytes += stats.size
+      const candidate = await orphanCandidate(path.join(directory, entry.name))
+      if (candidate) candidates.set(entry.name, candidate)
     }
-    return { count, bytes }
+    return { directory, candidates }
   }
 
-  inspectOrphanMedia() {
-    return this.queue(() => this.scanOrphanMedia(false))
+  inspectOrphanMedia(): Promise<OrphanMediaPreview> {
+    return this.queue(() => this.withProjectLock(async (file, assertLock) => {
+      this.pendingCleanup = undefined
+      const json = await readProjectFile(file)
+      const { candidates } = await this.scanOrphanMedia(projectSchema.parse(JSON.parse(json)))
+      assertLock()
+      const token = randomUUID()
+      this.pendingCleanup = { token, project: projectFingerprint(json), candidates }
+      return {
+        token, count: candidates.size, files: [...candidates.keys()].sort(),
+        bytes: [...candidates.values()].reduce((bytes, candidate) => bytes + candidate.bytes, 0),
+      }
+    }))
   }
 
-  cleanOrphanMedia() {
+  cancelOrphanMedia(tokenInput: unknown) {
+    const token = idSchema.parse(tokenInput)
     return this.queue(() => {
-      this.assertWritable()
-      return this.scanOrphanMedia(true)
+      if (this.pendingCleanup?.token === token) this.pendingCleanup = undefined
+      return Promise.resolve(null)
     })
+  }
+
+  cleanOrphanMedia(tokenInput: unknown) {
+    const token = idSchema.parse(tokenInput)
+    return this.queue(() => this.withProjectLock(async (file, assertLock) => {
+      this.assertWritable()
+      const pending = this.pendingCleanup
+      if (!pending || pending.token !== token) throw new OrphanMediaPreviewError()
+      this.pendingCleanup = undefined
+      const json = await readProjectFile(file)
+      if (projectFingerprint(json) !== pending.project) throw new OrphanMediaPreviewError()
+      const { directory, candidates } = await this.scanOrphanMedia(projectSchema.parse(JSON.parse(json)))
+      if (candidates.size !== pending.candidates.size ||
+        [...candidates].some(([name, value]) => pending.candidates.get(name)?.fingerprint !== value.fingerprint) ||
+        await readProjectFile(file) !== json) throw new OrphanMediaPreviewError()
+      let count = 0
+      let bytes = 0
+      for (const [name, candidate] of candidates) {
+        const target = path.join(directory, name)
+        if ((await orphanCandidate(target))?.fingerprint !== candidate.fingerprint) throw new OrphanMediaPreviewError()
+        assertLock()
+        await rm(target)
+        count++
+        bytes += candidate.bytes
+      }
+      return { count, bytes }
+    }))
   }
 
   previewPlan(episodeInput: unknown, input: unknown, source: 'import' | 'magpie' = 'import'): Promise<PlanPreview> {
@@ -515,7 +576,7 @@ export class ProjectStore {
       if (!pending.staged.changes.length) throw new Error('没有可合并的变更')
       const next = pending.staged.apply(choices)
       this.pendingPlan = undefined
-      return this.commit(next)
+      return this.withProjectLock((file, assertLock) => this.commit(next, file, assertLock))
     })
   }
 
@@ -525,7 +586,7 @@ export class ProjectStore {
       const episode = findEpisode(next, rendered.id)
       if (frameSpec(next).ratio !== ratio || exportInputsChanged(rendered, episode, renderedProject, next)) throw new Error('成片内容已变更')
       episode.exportRecord = { exportedAt: new Date().toISOString(), stale: false }
-      return this.commit(next)
+      return this.withProjectLock((file, assertLock) => this.commit(next, file, assertLock))
     })
   }
 
@@ -552,7 +613,6 @@ export class ProjectStore {
       const directory = await checkedDirectory(path.join(this.root, directoryName))
       const temp = path.join(directory, `.${id}.tmp`)
       const file = path.join(directory, `${id}.${extension}`)
-      let archived = false
       try {
         await copyFile(source, temp, constants.COPYFILE_EXCL)
         const copied = await checkedFile(temp)
@@ -579,8 +639,6 @@ export class ProjectStore {
         ], { signal })
         const handle = await open(temp, 'r+')
         try { await handle.sync() } finally { await handle.close() }
-        await safeRename(temp, file)
-        archived = true
         const version = versionSchema.parse({
           id, name: path.basename(source), extension, createdAt: new Date().toISOString(),
           ...(seconds !== undefined && { seconds }),
@@ -589,10 +647,16 @@ export class ProjectStore {
         track.versions.push(version)
         track.activeId = id
         resumeMedia(project, target)
-        return await this.commit(project)
-      } catch (error) {
-        if (archived) await rm(file, { force: true }).catch(() => {})
-        throw error
+        return await this.withProjectLock(async (projectFile, assertLock) => {
+          await this.assertCurrent(projectFile, assertLock)
+          await safeRename(temp, file)
+          try {
+            return await this.commit(project, projectFile, assertLock)
+          } catch (error) {
+            await rm(file, { force: true }).catch(() => {})
+            throw error
+          }
+        })
       } finally {
         await rm(temp, { force: true }).catch(() => {})
       }

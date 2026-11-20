@@ -9,7 +9,8 @@ export interface OpenProject {
   directory: string
 }
 
-export type ReplyError = { ok: false; error: string; code?: 'update-package-invalid' | 'update-manual-required' | 'upgrade-canceled' | 'project-conflict' }
+export type ReplyError = { ok: false; error: string; code?:
+  'update-package-invalid' | 'update-manual-required' | 'upgrade-canceled' | 'project-conflict' | 'orphan-preview-stale' }
 export type Reply<T> = { ok: true; value: T } | ReplyError
 export type RecentProject = { id: string; title: string; directory: string; fictional: boolean }
 export type Tool = GenerationKind | 'planning'
@@ -28,6 +29,7 @@ export type UpdateCheck = { currentVersion: string } & (
 export type UpdateProgress = { received: number; total: number }
 export type UpdateDownload = { status: 'canceled' } | { status: 'ready'; fileName: string }
 export type OrphanMediaReport = { count: number; bytes: number }
+export type OrphanMediaPreview = OrphanMediaReport & { token: string; files: string[] }
 export interface Workbench {
   open(): Promise<Reply<OpenProject | null>>
   recentProjects(): Promise<Reply<RecentProject[]>>
@@ -53,8 +55,9 @@ export interface Workbench {
   mergePlan(key: string, token: string, replacements: string[]): Promise<Reply<Project>>
   importMedia(key: string, target: MediaTarget): Promise<Reply<Project | null>>
   importDroppedMedia(key: string, target: MediaTarget, file: File): Promise<Reply<Project | null>>
-  inspectOrphanMedia(key: string): Promise<Reply<OrphanMediaReport>>
-  cleanOrphanMedia(key: string): Promise<Reply<OrphanMediaReport>>
+  inspectOrphanMedia(key: string): Promise<Reply<OrphanMediaPreview>>
+  cancelOrphanMedia(key: string, token: string): Promise<Reply<null>>
+  cleanOrphanMedia(key: string, token: string): Promise<Reply<OrphanMediaReport>>
   copy(text: string): Promise<Reply<null>>
   openTool(key: string, tool: Tool): Promise<Reply<null>>
   render(key: string, episodeId: string, mode: RenderProgress['mode'], rebuild?: boolean): Promise<Reply<RenderResult>>
