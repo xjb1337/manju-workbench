@@ -1,8 +1,8 @@
-import { useEffect, useId, useRef, useState, type DragEvent, type ReactNode } from 'react'
-import { ArrowDown, ArrowUp, Check, Copy, FilmStrip, Image as ImageIcon, MusicNote, Pause, Play, Plus, Trash, UploadSimple } from '@phosphor-icons/react'
+import { Component, useEffect, useId, useRef, useState, type DragEvent, type ErrorInfo, type ReactNode } from 'react'
+import { ArrowDown, ArrowUp, Check, CircleDashed, Clock, Copy, FilmStrip, Image as ImageIcon, MusicNote, Pause, Play, Plus, Trash, UploadSimple, WarningCircle } from '@phosphor-icons/react'
 import type { OpenProject } from '../shared/api'
 import { frameSpec, shotMethod, type Ratio } from '../shared/creative'
-import { activeVersion, shotVisual, timecode, type Episode, type MediaKind, type Track, type Version } from '../shared/model'
+import { activeVersion, shotVisual, timecode, type Episode, type MediaKind, type Shot, type Track, type Version } from '../shared/model'
 
 export const kindLabel: Record<MediaKind, string> = { image: '参考图', video: '视频', audio: '配音' }
 const kindIcon = { image: ImageIcon, video: FilmStrip, audio: MusicNote }
@@ -84,6 +84,12 @@ export function MediaRow({ track, kind, opened, busy, importId, keepId, onImport
   </div>}</div>
 }
 
+const clipStatusMeta: Record<Shot['status'], { className: 'approved' | 'review' | 'idle'; label: string }> = {
+  已通过: { className: 'approved', label: '已通过' },
+  待审核: { className: 'review', label: '待审核' },
+  待制作: { className: 'idle', label: '待制作' },
+}
+
 export function Timeline({ opened, episode, shotId, busy, onSelect, onAdd, onMove, onDuplicate }: {
   opened: OpenProject; episode: Episode; shotId?: string; busy: boolean
   onSelect: (id: string) => void; onAdd: () => void; onMove: (direction: -1 | 1) => void; onDuplicate: () => void
@@ -105,17 +111,25 @@ export function Timeline({ opened, episode, shotId, busy, onSelect, onAdd, onMov
       {episode.shots.map((shot, position) => {
         const method = shotMethod(opened.project, shot)
         const visual = shotVisual(shot, method)
+        const status = clipStatusMeta[shot.status]
         const from = start
         start += shot.frames
         return <button key={shot.id} className="clip" disabled={busy} aria-pressed={shot.id === shotId} onClick={() => onSelect(shot.id)}
-          aria-label={`镜头 ${sequence(position)} ${shot.title}`}>
+          aria-label={`镜头 ${sequence(position)} ${shot.title}`} aria-description={shot.status}>
           <div className="clip-ruler">{timecode(from, true)}</div>
           <div className="clip-image" style={{ aspectRatio: `${spec.width} / ${spec.height}` }}>
-            {visual?.kind === 'image' ? <img src={mediaUrl(opened, visual.version)} alt="" /> : visual
-              ? <video src={mediaUrl(opened, visual.version)} preload="metadata" muted aria-hidden="true" />
+            {visual?.kind === 'image' ? <img src={mediaUrl(opened, visual.version)} alt="" loading="lazy" decoding="async" /> : visual
+              ? <video src={mediaUrl(opened, visual.version)} preload="none" muted aria-hidden="true" />
               : <FilmStrip size={26} />}<b>{sequence(position)}</b></div>
           <div className="clip-meta"><strong>{shot.title}</strong><span>{timecode(shot.frames, true)}</span></div>
-          <div className={`clip-state ${shot.status === '已通过' ? 'approved' : shot.status === '待审核' ? 'review' : 'idle'}`} title={shot.status} />
+          <div className={`clip-state ${status.className}`} data-status={status.className} title={shot.status}>
+            {status.className === 'approved'
+              ? <Check size={11} weight="bold" aria-hidden="true" />
+              : status.className === 'review'
+                ? <Clock size={11} weight="bold" aria-hidden="true" />
+                : <CircleDashed size={11} aria-hidden="true" />}
+            <span>{status.label}</span>
+          </div>
         </button>
       })}
     </div>}
@@ -191,10 +205,51 @@ export function PreviewPlayer({ source, ratio, onError }: { source: string; rati
 export function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null)
   const titleId = useId()
-  useEffect(() => { dialog.current?.showModal() }, [])
+  useEffect(() => {
+    const element = dialog.current
+    if (!element) return
+    if (!element.open) element.showModal()
+    return () => {
+      if (element.open) element.close()
+    }
+  }, [])
   return <dialog ref={dialog} aria-labelledby={titleId} onCancel={event => { event.preventDefault(); onClose() }}>
     <h2 id={titleId}>{title}</h2>{children}
   </dialog>
+}
+
+type ErrorBoundaryProps = { children: ReactNode; onReset?: () => void }
+type ErrorBoundaryState = { error: Error | null }
+
+/** Catches uncaught renderer errors and renders a recoverable fallback surface. */
+export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  state: ErrorBoundaryState = { error: null }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { error }
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('Renderer ErrorBoundary caught an error:', error, info)
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children
+    return <main className="error-boundary" role="alert">
+      <div className="welcome-card error-boundary-card">
+        <div className="welcome-mark"><WarningCircle size={34} /></div>
+        <h1>界面遇到意外错误</h1>
+        <p className="error-boundary-message">{this.state.error.message || '渲染过程中发生未知异常'}</p>
+        <div className="dialog-actions">
+          <button type="button" onClick={() => {
+            this.setState({ error: null })
+            this.props.onReset?.()
+          }}>尝试恢复</button>
+          <button type="button" className="primary" onClick={() => window.location.reload()}>刷新界面</button>
+        </div>
+      </div>
+    </main>
+  }
 }
 
 export function NameModal({ title, initial = '', confirm, busy, error, onClose, onSubmit }: {

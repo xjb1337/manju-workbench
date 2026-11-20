@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { ArrowSquareOut, Copy, FileText, FloppyDisk, Sparkle } from '@phosphor-icons/react'
 import {
-  defaultMethod, detailLabels, frameSpec, generationKindSchema, generationLabels, generationPresets, generationToolUrl,
-  methodLabels, ratioSchema, workTypeLabels, workTypeSchema,
-  type Brief, type DetailKind, type GenerationKind, type GenerationTool, type Ratio, type WorkType,
+  briefTextFields, defaultMethod, detailLabels, frameSpec, generationKindSchema, generationLabels, generationPresets,
+  methodLabels, parseBriefDraft, ratioSchema, workTypeLabels, workTypeSchema,
+  type Brief, type BriefValidationErrors, type DetailKind, type GenerationKind, type GenerationTool, type Ratio, type WorkType,
 } from '../shared/creative'
 import { shotDialogueSchema, type Episode, type Mutation, type Project, type Shot } from '../shared/model'
 import {
@@ -21,9 +21,9 @@ type CopyText = (text: string, failure: Failure) => Promise<boolean>
 type BriefChange = Extract<Mutation, { type: 'project.brief' }>
 type DetailAction = Extract<Mutation, { type: 'shot.detail' }>['action']
 type VoiceChange = Pick<Extract<Mutation, { type: 'shot.apply-voice' }>, 'before' | 'voiceBody' | 'dialogue'>
-const briefTextFields = ['theme', 'audience', 'style', 'language', 'tools', 'terms'] as const
 const generationKinds = generationKindSchema.options
 const emptyTool: GenerationTool = { name: '', url: '' }
+const emptyBriefErrors = (): BriefValidationErrors => ({ text: {}, generation: {} })
 
 export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, onImport, hasScript, onWriteScript, onMagpie }: {
   project: Project; episode?: Episode; busy: boolean; onDirty: (dirty: boolean) => void
@@ -39,11 +39,13 @@ export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, on
     }
   }
   const [draft, setDraft] = useState(fields)
-  const [toolErrors, setToolErrors] = useState<Partial<Record<GenerationKind, string>>>({})
+  const [targetBadInput, setTargetBadInput] = useState(false)
+  const [briefErrors, setBriefErrors] = useState<BriefValidationErrors>(emptyBriefErrors)
   const saved = fields()
-  const targetSeconds = draft.target ? Number(draft.target) : undefined
+  const trimmedTarget = draft.target.trim()
+  const targetSeconds = trimmedTarget ? Number(trimmedTarget) : undefined
   const normalizedTool = (kind: GenerationKind) => ({ name: draft.generation[kind].name.trim(), url: draft.generation[kind].url.trim() })
-  const dirty = draft.workType !== saved.workType || draft.ratio !== saved.ratio || targetSeconds !== project.brief?.targetSeconds
+  const dirty = draft.workType !== saved.workType || draft.ratio !== saved.ratio || targetBadInput || targetSeconds !== project.brief?.targetSeconds
     || briefTextFields.some(key => draft.text[key].trim() !== saved.text[key])
     || generationKinds.some(kind => {
       const tool = normalizedTool(kind)
@@ -55,24 +57,20 @@ export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, on
   const missing = missingBrief(tentative)
   function setTool(kind: GenerationKind, tool: GenerationTool) {
     setDraft(current => ({ ...current, generation: { ...current.generation, [kind]: tool } }))
-    setToolErrors(current => ({ ...current, [kind]: undefined }))
+    setBriefErrors(current => ({ ...current, generation: { ...current.generation, [kind]: undefined }, general: undefined }))
   }
   async function commitBrief() {
-    const generation: NonNullable<Brief['generation']> = {}
-    const errors: typeof toolErrors = {}
-    for (const kind of generationKinds) {
-      const tool = normalizedTool(kind)
-      const parsed = generationToolUrl.safeParse(tool.url)
-      if (!parsed.success) errors[kind] = parsed.error.issues[0].message
-      else if (tool.name || tool.url) generation[kind] = tool
-    }
-    setToolErrors(errors)
-    const invalid = generationKinds.find(kind => errors[kind])
-    if (invalid) {
-      document.getElementById(`generation-${invalid}-url`)?.focus()
+    const result = parseBriefDraft({
+      ...draft,
+      target: targetBadInput ? 'NaN' : draft.target,
+    })
+    if (!result.ok) {
+      setBriefErrors(result.errors)
+      document.getElementById(result.focusId)?.focus()
       return false
     }
-    const savedOk = await onSave({ type: 'project.brief', workType: draft.workType, brief: { ...tentative, generation } })
+    setBriefErrors(emptyBriefErrors())
+    const savedOk = await onSave({ type: 'project.brief', workType: draft.workType, brief: result.data })
     return savedOk !== false
   }
   function save(event: FormEvent) {
@@ -86,7 +84,7 @@ export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, on
   return <main className="stage wide brief-stage">
     <div className="stage-heading"><h2>制作简报</h2></div>
     <div className="brief-layout">
-      <form className="brief-form" onSubmit={save}>
+      <form className="brief-form" onSubmit={save} noValidate>
         <fieldset disabled={busy}>
           <div className="brief-grid">
             <label className="field">作品类型<select value={draft.workType} onChange={event => setDraft({ ...draft, workType: event.target.value as WorkType })}>
@@ -96,13 +94,34 @@ export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, on
               onChange={event => setDraft({ ...draft, ratio: event.target.value as Ratio })}>
               {ratioSchema.options.map(ratio => <option key={ratio}>{ratio}</option>)}
             </select></label>
-            <label className="field">{briefFields.targetSeconds}<input type="number" min="0.001" max="86400" step="any"
-              value={draft.target} onChange={event => setDraft({ ...draft, target: event.target.value })} /></label>
+            <label className="field">{briefFields.targetSeconds}
+              <input id="brief-target-seconds" type="number" min="0.001" max="86400" step="any"
+                value={draft.target}
+                aria-invalid={!!briefErrors.targetSeconds}
+                aria-describedby={briefErrors.targetSeconds ? 'brief-target-seconds-error' : undefined}
+                onChange={event => {
+                  setTargetBadInput(event.currentTarget.validity.badInput)
+                  setDraft({ ...draft, target: event.target.value })
+                  setBriefErrors(current => ({ ...current, targetSeconds: undefined, general: undefined }))
+                }} />
+              {briefErrors.targetSeconds && <p id="brief-target-seconds-error" className="inline-error" role="alert">{briefErrors.targetSeconds}</p>}
+            </label>
             {briefTextFields.map(key => {
-              const replace = (value: string) => setDraft({ ...draft, text: { ...draft.text, [key]: value } })
+              const error = briefErrors.text[key]
+              const errorId = `brief-${key}-error`
+              const replace = (value: string) => {
+                setDraft({ ...draft, text: { ...draft.text, [key]: value } })
+                setBriefErrors(current => ({ ...current, text: { ...current.text, [key]: undefined }, general: undefined }))
+              }
               return <label className={`field${key === 'terms' ? ' span' : ''}`} key={key}>{briefFields[key]}
-                {key === 'terms' ? <textarea rows={3} maxLength={5000} value={draft.text[key]} onChange={event => replace(event.target.value)} />
-                  : <input maxLength={1000} value={draft.text[key]} onChange={event => replace(event.target.value)} />}
+                {key === 'terms'
+                  ? <textarea id={`brief-${key}`} rows={3} maxLength={5000} value={draft.text[key]}
+                      aria-invalid={!!error} aria-describedby={error ? errorId : undefined}
+                      onChange={event => replace(event.target.value)} />
+                  : <input id={`brief-${key}`} maxLength={1000} value={draft.text[key]}
+                      aria-invalid={!!error} aria-describedby={error ? errorId : undefined}
+                      onChange={event => replace(event.target.value)} />}
+                {error && <p id={errorId} className="inline-error" role="alert">{error}</p>}
               </label>
             })}
           </div>
@@ -112,6 +131,7 @@ export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, on
               const label = `${generationLabels[kind]}工具`
               const tool = draft.generation[kind]
               const prefix = `generation-${kind}`
+              const toolError = briefErrors.generation[kind]
               return <div key={kind} className="generation-settings-row" role="group" aria-labelledby={`${prefix}-label`}>
                 <div className="generation-settings-head">
                   <h4 id={`${prefix}-label`}>{label}</h4>
@@ -121,15 +141,19 @@ export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, on
                 </div>
                 <div className="brief-grid">
                   <label className="field">{label}名称<input id={`${prefix}-name`} maxLength={80} value={tool.name}
+                    aria-invalid={toolError?.field === 'name'}
+                    aria-describedby={toolError?.field === 'name' ? `${prefix}-error` : undefined}
                     onChange={event => setTool(kind, { ...tool, name: event.target.value })} /></label>
                   <label className="field">{label}网址<input id={`${prefix}-url`} type="url" maxLength={2048} value={tool.url}
-                    aria-invalid={!!toolErrors[kind]} aria-describedby={toolErrors[kind] ? `${prefix}-error` : undefined}
+                    aria-invalid={toolError?.field === 'url'}
+                    aria-describedby={toolError?.field === 'url' ? `${prefix}-error` : undefined}
                     onChange={event => setTool(kind, { ...tool, url: event.target.value })} /></label>
                 </div>
-                {toolErrors[kind] && <p id={`${prefix}-error`} className="inline-error" role="alert">{toolErrors[kind]}</p>}
+                {toolError && <p id={`${prefix}-error`} className="inline-error" role="alert">{toolError.message}</p>}
               </div>
             })}
           </section>
+          {briefErrors.general && <p className="inline-error" role="alert">{briefErrors.general}</p>}
           <div className="brief-save"><button className="primary" type="submit" disabled={!dirty}><FloppyDisk size={16} /> 保存简报</button></div>
         </fieldset>
       </form>

@@ -7,7 +7,7 @@ import { defaultAiGatewayConfig, type AiGatewayConfig } from '../shared/plan'
 import { productionProgress, type StepId } from '../shared/production'
 import { legacyDetail, savedShotPrompt } from '../shared/prompts'
 import { AiSettingsDialog, sameGateway, ScriptAiDialog, type AiPanelOptions, type GatewayProbe } from './AiPanels'
-import { Badge, Modal, NameModal, PreviewPlayer, kindLabel } from './components'
+import { Badge, ErrorBoundary, Modal, NameModal, PreviewPlayer, kindLabel } from './components'
 import { BriefPanel, DetailDialog, PlanImportDialog, PlanningDialog } from './CreativePanels'
 import { Inspector } from './Inspector'
 import { FfmpegPanel } from './FfmpegPanel'
@@ -48,6 +48,13 @@ function formatBytes(bytes: number) {
 }
 
 export function App() {
+  const [resetKey, setResetKey] = useState(0)
+  return <ErrorBoundary onReset={() => setResetKey(value => value + 1)}>
+    <WorkbenchApp key={resetKey} />
+  </ErrorBoundary>
+}
+
+function WorkbenchApp() {
   const [opened, setOpened] = useState<OpenProject | null>(null)
   const [recent, setRecent] = useState<RecentProject[]>([])
   const [episodeId, setEpisodeId] = useState('')
@@ -148,6 +155,10 @@ export function App() {
     return () => clearTimeout(timer)
   }, [message])
 
+  const hasModalOpen = Boolean(
+    ask || creativeDialog || progress || checking || player || aiSettingsOpen || scriptAi || musicOpen || ffmpegOpen || upgradeRequest,
+  )
+
   useWorkbenchShortcuts({
     opened: Boolean(opened),
     canSwitchShot: tab === 'shots' && Boolean(episode && shot),
@@ -155,7 +166,7 @@ export function App() {
     shotIndex,
     busy,
     dirty,
-    hasModalOpen: Boolean(ask || creativeDialog || progress || checking || player || aiSettingsOpen || scriptAi || musicOpen || ffmpegOpen),
+    hasModalOpen,
     onSelectShot: selectShot,
   })
 
@@ -177,7 +188,10 @@ export function App() {
   }
 
   async function run<T>(action: () => Promise<Reply<T>>, success?: (value: T) => void, failure?: (message: string, code?: ReplyError['code']) => void) {
-    if (running.current) return false
+    if (running.current) {
+      failure?.('已有操作正在进行，请稍候')
+      return false
+    }
     running.current = true
     setBusy(true)
     setMessage(null)
@@ -440,6 +454,7 @@ export function App() {
       if (targetShot) setShotId(targetShot.id)
       const target = issue.target
       if (target === 'music') {
+        setMessage(null)
         setMusicOpen(true)
         setFocusField('music-import')
       } else if (target === 'dialogue') {
@@ -773,7 +788,7 @@ export function App() {
         </div>
       </Modal>
     })()}
-    {message && !player && ask?.kind !== 'name' && ask?.kind !== 'remove' && ask?.kind !== 'clean-orphans' && <div className={`toast ${message.error ? 'error' : ''}`} role={message.error ? 'alert' : 'status'}>
+    {message && !hasModalOpen && <div className={`toast ${message.error ? 'error' : ''}`} role={message.error ? 'alert' : 'status'}>
       {message.error ? <WarningCircle size={19} /> : <Check size={19} />}
       <span>{message.text}</span><button className="icon small subtle" title="关闭提示" aria-label="关闭提示" onClick={() => setMessage(null)}><X size={16} /></button>
     </div>}

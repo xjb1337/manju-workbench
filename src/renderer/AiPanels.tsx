@@ -20,7 +20,7 @@ export type AiPanelOptions = {
 export function useAiRequest({ baseUrl, model: defaultModel }: AiGatewayConfig, enabled = true) {
   const [trial, setTrial] = useState<{ baseUrl: string; model: string }>()
   const [destination, setDestination] = useState<{ baseUrl: string } & ({ network: AiNetwork } | { error: string })>()
-  const literal = aiIpNetwork(new URL(baseUrl).hostname)
+  const literal = aiIpNetwork(URL.parse(baseUrl)?.hostname ?? '')
   const checked = destination?.baseUrl === baseUrl ? destination : undefined
   const network = literal === 'loopback' || literal === 'lan' ? literal : checked && 'network' in checked ? checked.network : undefined
   const error = checked && 'error' in checked ? checked.error : undefined
@@ -54,7 +54,7 @@ export function AiRequestFields({ ai, request, scope, prompt, disabled }: {
   return <section className="ai-request">
     <div className="ai-request-target">
       <span className="ai-request-url">{aiCompletionUrl(config.baseUrl)}</span>
-      {request.network === 'lan' && new URL(config.baseUrl).protocol === 'http:' &&
+      {request.network === 'lan' && URL.parse(config.baseUrl)?.protocol === 'http:' &&
         <Badge value="局域网明文 HTTP" />}
       <button type="button" className="small subtle" disabled={disabled} onClick={openSettings}>切换网关</button>
     </div>

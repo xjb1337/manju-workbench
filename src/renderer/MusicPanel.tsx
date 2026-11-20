@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { formatVolumePercent } from '../shared/creative'
 import type { Episode, MusicSettings } from '../shared/model'
 import { Modal } from './components'
 
@@ -13,11 +14,12 @@ export function MusicPanel({ music, busy, canPreview, error, onClose, onImport, 
   onRemove: () => void
   onPreview: () => void
 }) {
+  const savedVolume = String(formatVolumePercent(music?.volume ?? 0))
   const [enabled, setEnabled] = useState(music?.enabled ?? false)
-  const [volume, setVolume] = useState(String((music?.volume ?? 0) * 100))
+  const [volume, setVolume] = useState(savedVolume)
   const [fadeIn, setFadeIn] = useState(String(music?.fadeIn ?? 0))
   const [fadeOut, setFadeOut] = useState(String(music?.fadeOut ?? 0))
-  const changed = !!music && (enabled !== music.enabled || volume !== String(music.volume * 100)
+  const changed = !!music && (enabled !== music.enabled || volume !== savedVolume
     || fadeIn !== String(music.fadeIn) || fadeOut !== String(music.fadeOut))
 
   return <Modal title="背景音乐" onClose={onClose}>

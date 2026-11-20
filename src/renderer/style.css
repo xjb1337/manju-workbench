@@ -163,12 +163,12 @@ h3 { font-size: 14px; }
 .clip-image b { position: absolute; inset: auto auto 5px 6px; padding: 2px 5px; border-radius: 4px; background: #0c0d14e6; color: #f4f5f8; font: 700 11px ui-monospace, Consolas, monospace; font-variant-numeric: tabular-nums; }
 .timeline[data-ratio="9:16"] .clip { flex: 0 0 134px; }
 .timeline[data-ratio="9:16"] .clip-image { width: 66px; }
-.clip-meta { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 5px; font-size: 12px; padding: 7px 6px 9px; }
+.clip-meta { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 5px; font-size: 12px; padding: 7px 6px 6px; }
 .clip-meta strong { overflow: hidden; text-overflow: ellipsis; }
 .clip-meta span { flex: none; color: var(--muted); font: 10px ui-monospace, Consolas, monospace; }
-.clip-state { height: 3px; position: absolute; inset: auto 0 0; background: var(--line-strong); }
-.clip-state.approved { background: var(--ok); }
-.clip-state.review { background: #b98627; }
+.clip-state { display: flex; align-items: center; gap: 4px; width: 100%; padding: 3px 6px 4px; font-size: 11px; font-weight: 600; color: var(--muted); background: var(--well); border-top: 1px solid var(--line); border-bottom: 3px solid var(--line-strong); }
+.clip-state.approved { color: var(--ok); background: var(--ok-bg); border-bottom-color: var(--ok); }
+.clip-state.review { color: var(--warn); background: var(--warn-bg); border-bottom-color: #b98627; }
 .inspector { background: var(--panel); border-left: 1px solid var(--line); }
 .inspector-head, .inspector form, .asset-panel { padding: 15px 16px; }
 .inspector-head { border-bottom: 1px solid var(--line); }
@@ -251,9 +251,12 @@ dialog:has(.episode-player[data-ratio="9:16"]) { width: min(475px, calc(100vw - 
 .preview-controls input[type="range"] { height: 26px; padding: 0; cursor: pointer; accent-color: var(--accent); }
 .preview-buttons { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .preview-time { margin-right: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
-.preview-frame:fullscreen { display: grid; grid-template-rows: minmax(0, 1fr) auto; background: var(--panel); padding: 16px; }
+.preview-frame:fullscreen { display: grid; grid-template-rows: minmax(0, 1fr) auto; background: #090a0f; color: #f4f5f8; color-scheme: dark; padding: 16px; }
 .preview-frame:fullscreen .episode-player { width: 100%; height: 100%; max-height: none; }
 .preview-frame:fullscreen .preview-controls { width: min(100%, 960px); margin-inline: auto; }
+.preview-frame:fullscreen .preview-time { color: #b8bcd0; }
+.preview-frame:fullscreen .preview-buttons button { background: #1b1d28; border-color: #36394e; color: #f4f5f8; }
+.preview-frame:fullscreen .preview-buttons button:hover:not(:disabled) { background: #252838; border-color: #4d516e; }
 .toast { z-index: 3; position: fixed; bottom: 43px; right: 19px; display: flex; align-items: center; gap: 9px; max-width: min(650px, 90vw); background: var(--panel); color: var(--ok); border: 1px solid var(--line-strong); border-radius: 8px; padding: 5px 8px 5px 13px; box-shadow: var(--shadow); overflow-wrap: anywhere; }
 .toast.error { color: var(--danger); }
 .toast svg { flex: none; }
@@ -295,7 +298,7 @@ dialog:has(.preflight) { width: min(580px, calc(100vw - 42px)); }
 .generation-settings-row { display: grid; gap: 6px; margin-top: 12px; }
 .generation-settings-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .generation-settings-head h4 { margin: 0; font-size: 13px; }
-.generation-settings input[aria-invalid="true"] { border-color: var(--danger); }
+.brief-form :is(input, textarea)[aria-invalid="true"], .generation-settings input[aria-invalid="true"] { border-color: var(--danger); }
 .generation-action-label { max-width: 145px; overflow: hidden; text-overflow: ellipsis; }
 .brief-save { display: flex; justify-content: flex-end; margin-top: 16px; }
 .planning-panel { display: grid; gap: 16px; }
@@ -388,7 +391,23 @@ dialog:has(.creative-dialog) { width: min(855px, calc(100vw - 42px)); max-height
     outline: 2px solid Highlight;
     outline-offset: -2px;
   }
-  .clip-state, .monitor-dot {
+  .clip-state {
+    background: Canvas;
+    color: CanvasText;
+    border-top: 1px solid CanvasText;
+    border-bottom: 3px solid CanvasText;
+  }
+  .clip-state.approved {
+    border-bottom-color: Highlight;
+    color: Highlight;
+  }
+  .clip-state.review {
+    border-bottom-style: dashed;
+  }
+  .clip-state.idle {
+    border-bottom-style: dotted;
+  }
+  .monitor-dot {
     border: 1px solid CanvasText;
   }
   dialog {
@@ -426,3 +445,6 @@ dialog:has(.ffmpeg-content) { width: min(520px, calc(100vw - 42px)); }
 .ffmpeg-content li span:first-of-type { overflow-wrap: anywhere; }
 .ffmpeg-content li span[data-status] { color: var(--warn); }
 .ffmpeg-content li span[data-status="ready"] { color: var(--ok); }
+.error-boundary { min-height: 100dvh; display: grid; place-items: safe center; padding: 24px; background: var(--canvas); }
+.error-boundary-card { gap: 12px; }
+.error-boundary-message { color: var(--muted); overflow-wrap: anywhere; max-width: 100%; text-align: center; }
