@@ -195,7 +195,7 @@ test('themeBackground 与 resolveInitialBounds 覆盖正常恢复、副屏断开
   assert.deepEqual(clampedFallback, { width: 1200, height: 700, x: 100, y: 40, maximized: false })
 })
 
-test('cleanupStaleTempDirs 清理超时前缀目录并保留新目录与 manju-update-*', async () => {
+test('cleanupStaleTempDirs 清理超时前缀目录（含 manju-update-* 与 manju-signal-*）并保留新目录与无关目录', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'manju-cleanup-test-'))
   try {
     const now = Date.now()
@@ -206,10 +206,11 @@ test('cleanupStaleTempDirs 清理超时前缀目录并保留新目录与 manju-u
     const staleCache = path.join(root, 'manju-shot-cache-old')
     const freshRender = path.join(root, 'manju-render-work-new')
     const staleUpdate = path.join(root, 'manju-update-installer')
+    const staleSignal = path.join(root, 'manju-signal-old')
     const staleOther = path.join(root, 'unrelated-old-dir')
     const staleFile = path.join(root, 'manju-preview-file')
 
-    for (const dir of [stalePreview, staleCache, freshRender, staleUpdate, staleOther]) {
+    for (const dir of [stalePreview, staleCache, freshRender, staleUpdate, staleSignal, staleOther]) {
       await mkdir(dir)
     }
     await writeFile(staleFile, 'keep-file')
@@ -218,16 +219,18 @@ test('cleanupStaleTempDirs 清理超时前缀目录并保留新目录与 manju-u
     await utimes(staleCache, staleDate, staleDate)
     await utimes(freshRender, freshDate, freshDate)
     await utimes(staleUpdate, staleDate, staleDate)
+    await utimes(staleSignal, staleDate, staleDate)
     await utimes(staleOther, staleDate, staleDate)
     await utimes(staleFile, staleDate, staleDate)
 
     const removed = await cleanupStaleTempDirs(root, staleTempPrefixes, staleTempAgeMs, now)
-    assert.deepEqual(removed.sort(), [stalePreview, staleCache].sort())
+    assert.deepEqual(removed.sort(), [stalePreview, staleCache, staleUpdate, staleSignal].sort())
 
     assert.equal(await exists(stalePreview), false)
     assert.equal(await exists(staleCache), false)
     assert.equal(await exists(freshRender), true)
-    assert.equal(await exists(staleUpdate), true)
+    assert.equal(await exists(staleUpdate), false)
+    assert.equal(await exists(staleSignal), false)
     assert.equal(await exists(staleOther), true)
     assert.equal(await exists(staleFile), true)
   } finally {
