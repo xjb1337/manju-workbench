@@ -17,7 +17,7 @@ import { inspectEpisode, preflightAllows } from './preflight'
 import { ffmpegTools } from './process'
 import { exportDestination, renderEpisode, writeEpisodeSrt } from './render'
 import { fillSample, fillVerticalSample } from './sample'
-import { RecentProjects, themeSchema, type WindowBounds } from './recent-projects'
+import { isLocalAbsolutePath, RecentProjects, themeSchema, type WindowBounds } from './recent-projects'
 import { WorkbenchSession } from './session'
 import { findEpisode, findShot, OrphanMediaPreviewError, ProjectConflictError, ProjectStore } from './storage'
 import { cleanupStaleTempDirs, staleTempAgeMs, staleTempPrefixes } from './temp-cleanup'
@@ -96,7 +96,7 @@ function diagnose(error: unknown) {
 function handle<T>(channel: string, fn: (win: BrowserWindow, ...args: unknown[]) => T | Promise<T>) {
   ipcMain.handle(channel, async (event, ...args): Promise<Reply<T>> => {
     const win = window
-    if (!win || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame
+    if (!win || win.isDestroyed() || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame
       || event.senderFrame?.url !== rendererUrl || !workbench.canAcceptIpc()) return { ok: false, error: '操作不可用' }
     try {
       return { ok: true, value: await fn(win, ...args) }
@@ -237,10 +237,19 @@ function wire() {
     if (baseUrl !== recent.aiGateway.baseUrl) throw new Error('AI 网关设置已变化，请重新打开生成面板')
     return describeAiGateway(baseUrl)
   })
-  handle('ai:test-connection', (_win, input) => workbench.serial(async () => {
+  handle('ai:test-connection', async (win, input) => {
     const config = aiGatewayConfigSchema.parse(input)
-    return testAiGateway(config.baseUrl, new AbortController().signal)
-  }))
+    const controller = new AbortController()
+    const onClosed = () => controller.abort()
+    if (win.isDestroyed()) controller.abort()
+    else win.once('closed', onClosed)
+    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)])
+    try {
+      return await testAiGateway(config.baseUrl, signal)
+    } finally {
+      win.removeListener('closed', onClosed)
+    }
+  })
   handle('plan:generate-magpie', (_win, key, episodeInput, targetInput, scriptInput) => workbench.serial(async () => {
     const store = workbench.getStore(key)
     const episodeId = idSchema.nullable().parse(episodeInput)
@@ -304,7 +313,7 @@ function wire() {
   }))
   handle('project:import-dropped', (win, key, input, sourceInput) => workbench.serial(async () => {
     const target = mediaTargetSchema.parse(input)
-    const source = z.string().min(1).refine(path.isAbsolute, '拖入的文件路径无效').parse(sourceInput)
+    const source = z.string().min(1).refine(isLocalAbsolutePath, '拖入的文件路径无效').parse(sourceInput)
     const project = await (await writableProject(win, key)).importMedia(target, source)
     await recent.rememberMedia(source)
     return project
@@ -475,13 +484,20 @@ function createWindow() {
       maximized: win.isMaximized(),
     }
   }
+  const persistBounds = () => {
+    if (!latestBounds) return
+    const bounds = latestBounds
+    boundsSave = boundsSave.then(() => recent.setWindowBounds(bounds)).catch(error => {
+      console.error('window:bounds-save', error)
+    })
+  }
   const scheduleSaveBounds = () => {
     captureBounds()
     if (!latestBounds) return
     clearTimeout(boundsTimer)
     boundsTimer = setTimeout(() => {
       boundsTimer = undefined
-      if (latestBounds) boundsSave = recent.setWindowBounds(latestBounds)
+      persistBounds()
     }, 300)
   }
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -507,7 +523,7 @@ function createWindow() {
     clearTimeout(boundsTimer)
     boundsTimer = undefined
     captureBounds()
-    if (latestBounds) boundsSave = recent.setWindowBounds(latestBounds)
+    persistBounds()
   })
   win.on('closed', () => {
     clearTimeout(boundsTimer)

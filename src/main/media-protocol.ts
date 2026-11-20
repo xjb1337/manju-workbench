@@ -1,6 +1,5 @@
-import { createReadStream } from 'node:fs'
+import { open } from 'node:fs/promises'
 import { Readable } from 'node:stream'
-import { checkedFile } from './storage'
 
 const contentTypes: Record<string, string> = {
   jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp',
@@ -24,19 +23,32 @@ export async function mediaResponse(
   options?: { cacheControl?: string },
 ) {
   if (request.method !== 'GET' && request.method !== 'HEAD') return new Response(null, { status: 405 })
-  const { size } = await checkedFile(file)
-  const range = rangeFor(request.headers.get('Range'), size)
-  const headers = new Headers({
-    'Accept-Ranges': 'bytes', 'Content-Type': contentTypes[extension] ?? 'application/octet-stream',
-    'X-Content-Type-Options': 'nosniff', 'Cache-Control': options?.cacheControl ?? 'no-store',
-  })
-  if (range === null) {
-    headers.set('Content-Range', `bytes */${size}`)
-    return new Response(null, { status: 416, headers })
+  request.signal?.throwIfAborted()
+  const handle = await open(file, 'r')
+  let handedOff = false
+  try {
+    const stats = await handle.stat()
+    if (!stats.isFile()) throw new Error('文件无效')
+    const { size } = stats
+    const range = rangeFor(request.headers.get('Range'), size)
+    const headers = new Headers({
+      'Accept-Ranges': 'bytes', 'Content-Type': contentTypes[extension] ?? 'application/octet-stream',
+      'X-Content-Type-Options': 'nosniff', 'Cache-Control': options?.cacheControl ?? 'no-store',
+    })
+    if (range === null) {
+      headers.set('Content-Range', `bytes */${size}`)
+      return new Response(null, { status: 416, headers })
+    }
+    headers.set('Content-Length', String(range ? range.end - range.start + 1 : size))
+    if (range) headers.set('Content-Range', `bytes ${range.start}-${range.end}/${size}`)
+    if (request.method === 'HEAD') return new Response(null, { status: range ? 206 : 200, headers })
+    request.signal?.throwIfAborted()
+    const stream = handle.createReadStream({ ...range, signal: request.signal, autoClose: true })
+    const body = Readable.toWeb(stream) as ReadableStream<Uint8Array>
+    const response = new Response(body, { status: range ? 206 : 200, headers })
+    handedOff = true
+    return response
+  } finally {
+    if (!handedOff) await handle.close().catch(() => {})
   }
-  headers.set('Content-Length', String(range ? range.end - range.start + 1 : size))
-  if (range) headers.set('Content-Range', `bytes ${range.start}-${range.end}/${size}`)
-  const body = request.method === 'HEAD' ? null
-    : Readable.toWeb(createReadStream(file, { ...range, signal: request.signal })) as ReadableStream<Uint8Array>
-  return new Response(body, { status: range ? 206 : 200, headers })
 }
