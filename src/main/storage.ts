@@ -21,6 +21,8 @@ const directoryName = 'media'
 const maxProjectBytes = 32 * 1024 * 1024
 const maxMediaBytes = 4 * 1024 ** 3
 
+export class ProjectConflictError extends Error {}
+
 export async function safeRename(from: string, to: string) {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -415,7 +417,7 @@ export class ProjectStore {
     try {
       this.savedJson = await atomicJson(file, valid, async () => {
         if (await readProjectFile(file) !== this.savedJson || compromised) {
-          throw new Error('磁盘上的作品已变更，请保留草稿并重新打开作品后再保存')
+          throw new ProjectConflictError('磁盘上的作品已变更，请重新打开作品后再保存')
         }
       })
       this.document = valid

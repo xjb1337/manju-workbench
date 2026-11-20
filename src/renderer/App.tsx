@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ArrowSquareOut, Broom, Check, FilmSlate, FolderOpen, Moon, Plus, SlidersHorizontal, Sparkle, Sun, WarningCircle, X } from '@phosphor-icons/react'
-import type { OpenProject, RecentProject, RenderProgress, Reply } from '../shared/api'
+import type { OpenProject, RecentProject, RenderProgress, Reply, ReplyError } from '../shared/api'
 import { frameSpec, generationLabels, generationToolName, shotMethod, workTypeLabels, type DetailKind, type GenerationKind } from '../shared/creative'
 import { folderNameSchema, type MediaTarget, type Mutation, type Project, type Track } from '../shared/model'
 import { defaultAiGatewayConfig, type AiGatewayConfig } from '../shared/plan'
@@ -163,7 +163,7 @@ export function App() {
     else action()
   }
 
-  async function run<T>(action: () => Promise<Reply<T>>, success?: (value: T) => void, failure?: (message: string) => void) {
+  async function run<T>(action: () => Promise<Reply<T>>, success?: (value: T) => void, failure?: (message: string, code?: ReplyError['code']) => void) {
     if (running.current) return false
     running.current = true
     setBusy(true)
@@ -172,7 +172,7 @@ export function App() {
       const result = await action()
       if (!result.ok) {
         if (result.code === 'upgrade-canceled') return false
-        if (failure) failure(result.error)
+        if (failure) failure(result.error, result.code)
         else setMessage({ text: result.error, error: true })
         return false
       }
@@ -207,12 +207,19 @@ export function App() {
     if (next) setOpened(current => current && ({ ...current, project: next }))
   }
 
-  function edit(change: Mutation, saved?: (next: Project) => void, failure?: (message: string) => void) {
+  function edit(change: Mutation, saved?: (next: Project) => void, failure?: (message: string, code?: ReplyError['code']) => void) {
     if (!opened) return Promise.resolve(false)
     return run(() => api.edit(opened.mediaKey, change), next => {
       accept(next)
       saved?.(next)
     }, failure)
+  }
+
+  function saveScript(change: Extract<Mutation, { type: 'project.edit' | 'episode.edit' }>, onConflict: () => void) {
+    void edit(change, undefined, (text, code) => {
+      if (code === 'project-conflict') onConflict()
+      setMessage({ text, error: true })
+    })
   }
 
   function importMedia(target: MediaTarget) {
@@ -271,20 +278,15 @@ export function App() {
   }
 
   function goToScript(scope: typeof scriptScope, action?: () => void) {
-    const open = () => {
-      setDirty(false)
-      setEditorRevision(value => value + 1)
-      setScriptScope(scope)
+    const nextScope = episode ? scope : 'project'
+    goTo('script', () => {
+      setScriptScope(nextScope)
       action?.()
-    }
-    if (tab === 'script' && scriptScope !== scope) navigate(open)
-    else goTo('script', open)
+    }, (episode ? scriptScope : 'project') !== nextScope)
   }
 
   function writeScript() {
-    const scope = episode ? 'episode' : 'project'
-    if (tab === 'script' && scriptScope === scope) setFocusField('script-text')
-    else goToScript(scope, () => setFocusField('script-text'))
+    goToScript(episode ? 'episode' : 'project', () => setFocusField('script-text'))
   }
 
   function selectGuideStep(id: StepId) {
@@ -521,7 +523,7 @@ export function App() {
           }} />
         {tab === 'shots' ? <ShotStage opened={opened} episode={episode} shot={shot} shotIndex={shotIndex} spec={spec}
           method={method} busy={busy} canRender={canRender} playerOpen={Boolean(player)}
-          onOpenEpisodeScript={() => navigate(() => { setScriptScope('episode'); setTab('script'); setDirty(false); setEditorRevision(value => value + 1) })}
+          onOpenEpisodeScript={() => goToScript('episode')}
           onPreview={() => void render('preview')} onRebuildPreview={() => void render('preview', true)} onExport={requestExport} onExportSrt={exportSrt}
           onAddPrimary={() => episode ? addShot() : addEpisode()}
           hasScript={hasScript} onWriteScript={writeScript} onMagpie={() => openMagpieDialog()}
@@ -538,10 +540,11 @@ export function App() {
             hasScript={hasScript} onWriteScript={writeScript} onMagpie={() => openMagpieDialog()} />
           : tab === 'script' ? <ScriptView project={project} episode={episode} scriptScope={scriptScope}
             editorRevision={editorRevision} busy={busy}
-            onSelectScope={scope => navigate(() => { setScriptScope(scope); setDirty(false); setEditorRevision(value => value + 1) })}
+            onSelectScope={goToScript}
             onDirty={setDirty}
-            onSaveProject={(title, script) => void edit({ type: 'project.edit', title, script })}
-            onSaveEpisode={(title, script) => episode && void edit({ type: 'episode.edit', episodeId: episode.id, title, script })}
+            onSaveProject={(title, script, onConflict) => saveScript({ type: 'project.edit', title, script }, onConflict)}
+            onSaveEpisode={(title, script, onConflict) => episode && saveScript({ type: 'episode.edit', episodeId: episode.id, title, script }, onConflict)}
+            onCopyDraft={text => void run(() => api.copy(text), () => setMessage({ text: '草稿已复制' }))}
             onRemoveEpisode={() => episode && remove('删除集数', episode.title, { type: 'episode.remove', episodeId: episode.id })}
             onAiAssist={(scope, script, apply) => setScriptAi({ scope, script, apply })}
             onAiStoryboard={script => openMagpieDialog(script)} />

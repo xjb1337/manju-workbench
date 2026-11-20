@@ -117,6 +117,67 @@ async function addAsset(app, page, label, input, scope = page) {
   await footerSaved(page)
 }
 
+async function keepScriptDraft(page, text, scope) {
+  const editor = page.locator('#script-text')
+  await editor.evaluate(element => { window.scriptEditorBeforeNavigation = element })
+  await selectStep(page, 'script')
+  await button(stage(page), scope).click()
+  assert.ok(await editor.evaluate(element => window.scriptEditorBeforeNavigation === element))
+  assert.equal(await editor.inputValue(), text)
+  await page.locator('footer').getByText('有未保存修改', { exact: true }).waitFor()
+}
+
+async function verifyScriptDraft(folder) {
+  const { ProjectStore } = require('../dist/main/storage')
+  const store = await ProjectStore.create(folder, '剧本冲突验收', true)
+  await store.edit({ type: 'episode.add', title: '第 1 集' })
+  await store.edit({ type: 'episode.add', title: '第 2 集' })
+  const { app, page } = await launch(path.join(folder, '剧本 Electron Profile'))
+  try {
+    await choose(app, store.root)
+    await button(page.getByRole('banner'), '打开作品').click()
+    await page.locator('.project-title').getByText('示例 / 虚构', { exact: true }).waitFor()
+    await selectStep(page, 'script')
+    const editor = page.locator('#script-text')
+    const draft = '手写草稿\n第二行保留。'
+    await editor.fill(draft)
+    await keepScriptDraft(page, draft, '作品剧本')
+    const discard = page.getByRole('dialog', { name: '未保存修改' })
+    const secondEpisode = page.getByRole('navigation', { name: '集数', exact: true }).getByRole('button', { name: /第 2 集/ })
+    for (const target of [button(stage(page), '集数剧本'), button(directory(page), '分镜'), secondEpisode]) {
+      await target.click()
+      await button(discard, '继续编辑').click()
+      assert.equal(await editor.inputValue(), draft)
+      await page.locator('footer').getByText('有未保存修改', { exact: true }).waitFor()
+    }
+    await button(stage(page), '集数剧本').click()
+    await button(discard, '放弃修改').click()
+    assert.equal(await editor.inputValue(), '')
+    await editor.fill(draft)
+    await keepScriptDraft(page, draft, '集数剧本')
+    await secondEpisode.click()
+    await button(discard, '放弃修改').click()
+    await button(stage(page), '集数剧本').click()
+    assert.equal(await editor.inputValue(), '')
+
+    await editor.fill(draft)
+    await store.edit({ type: 'episode.edit', episodeId: store.snapshot.episodes[1].id, title: '第 2 集', script: '另一个实例已保存' })
+    const file = path.join(store.root, 'project.json')
+    const saved = await hash(file)
+    await button(stage(page), '保存').click()
+    await page.getByRole('alert').getByText(/磁盘上的作品已变更/).waitFor()
+    assert.equal(await editor.inputValue(), draft)
+    await screenshot(page, 'feature-script-save-conflict.png')
+    await button(stage(page), '复制草稿').click()
+    await page.getByText('草稿已复制', { exact: true }).waitFor()
+    assert.equal(await app.evaluate(({ clipboard }) => clipboard.readText()), draft)
+    assert.equal(await hash(file), saved)
+    await page.locator('footer').getByText('有未保存修改', { exact: true }).waitFor()
+  } finally {
+    await app.close()
+  }
+}
+
 async function verifyMagpieDraft(app, page, file, first) {
   const before = await documentAt(file)
   await app.evaluate((_electron, shotId) => {
@@ -243,6 +304,7 @@ async function verifyAiWorkbenchFlows(app, page, file, first) {
     await button(scriptPreview, '应用到编辑器').click()
     await scriptPreview.waitFor({ state: 'hidden' })
     assert.equal(await stage(page).getByLabel('剧本').inputValue(), 'AI 剧本草案：第一场，观测站脉冲亮起。')
+    await keepScriptDraft(page, 'AI 剧本草案：第一场，观测站脉冲亮起。', '作品剧本')
     assert.deepEqual(await documentAt(file), before)
     await button(stage(page), 'AI 生成分镜草案').click()
     const seededDialog = page.getByRole('dialog', { name: 'AI 生成分镜草案', exact: true })
@@ -1246,6 +1308,7 @@ async function main() {
     await app.close()
     const portrait = await verifyCreative(folder, parent, path.join(folder, '竖屏 Electron Profile'))
     const legacy = await verifyLegacyUpgrade(folder)
+    await verifyScriptDraft(folder)
     await verifyUpdates(folder, project)
     assert.deepEqual(await documentAt(projectFile), finalManifest)
     await writeFile(path.join(folder, 'acceptance.json'), JSON.stringify({
@@ -1256,6 +1319,7 @@ async function main() {
       updateFixtureNoReleaseAndNewVersion: true, updateFixtureCanceledAndVerified: true,
       updateFixtureNativeConfirmationCanceledAndDirtyBlocked: true,
       magpieDraftCancellationErrorAndConflictReview: true,
+      handwrittenAndAiScriptDraftsPreserved: true, scriptConflictKeepsDraftAndClipboard: true,
       legacyUpgradeCancellationPreservedSource: true, legacyUpgradeCopiedMedia: true,
       voiceDialogueConfirmedAndSrtExported: true, previewRebuildReplacedSessionCache: true,
       emptyProjectPrimaryActionChangedAfterScript: true, briefScrollLabelVisibleAtMinimumSize: true,

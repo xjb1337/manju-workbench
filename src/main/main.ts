@@ -16,7 +16,7 @@ import { exportDestination, renderEpisode, writeEpisodeSrt } from './render'
 import { fillSample, fillVerticalSample } from './sample'
 import { RecentProjects, themeSchema, type WindowBounds } from './recent-projects'
 import { WorkbenchSession } from './session'
-import { findEpisode, findShot, ProjectStore } from './storage'
+import { findEpisode, findShot, ProjectConflictError, ProjectStore } from './storage'
 import { cleanupStaleTempDirs, staleTempAgeMs, staleTempPrefixes } from './temp-cleanup'
 import { createProductionUpdater } from './update-system'
 import { InvalidUpdatePackageError, ManualUpdateRequiredError, type Updater } from './updater'
@@ -92,6 +92,7 @@ function handle<T>(channel: string, fn: (win: BrowserWindow, ...args: unknown[])
       return { ok: true, value: await fn(win, ...args) }
     } catch (error) {
       if (error instanceof UpgradeCanceled) return { ok: false, error: '已取消升级', code: 'upgrade-canceled' }
+      if (error instanceof ProjectConflictError) return { ok: false, error: error.message, code: 'project-conflict' }
       console.error(channel, error)
       if (error instanceof ManualUpdateRequiredError) return { ok: false, error: error.message, code: 'update-manual-required' }
       if (error instanceof InvalidUpdatePackageError) return { ok: false, error: error.message, code: 'update-package-invalid' }

@@ -64,6 +64,7 @@ export function ScriptView({
   onDirty,
   onSaveProject,
   onSaveEpisode,
+  onCopyDraft,
   onRemoveEpisode,
   onAiAssist,
   onAiStoryboard,
@@ -75,8 +76,9 @@ export function ScriptView({
   busy: boolean
   onSelectScope: (scope: 'project' | 'episode') => void
   onDirty: (value: boolean) => void
-  onSaveProject: (title: string, script: string) => void
-  onSaveEpisode: (title: string, script: string) => void
+  onSaveProject: (title: string, script: string, onConflict: () => void) => void
+  onSaveEpisode: (title: string, script: string, onConflict: () => void) => void
+  onCopyDraft: (text: string) => void
   onRemoveEpisode: () => void
   onAiAssist: (scope: 'project' | 'episode', currentScript: string, apply: (next: string) => void) => void
   onAiStoryboard: (currentScript: string) => void
@@ -95,15 +97,15 @@ export function ScriptView({
   return <main className="stage wide">
     <div className="stage-heading"><h2>剧本</h2><div className="actions">
       <button aria-pressed={scriptScope === 'project' || !episode} disabled={busy}
-        onClick={() => { if (scriptScope !== 'project') onSelectScope('project') }}>作品剧本</button>
+        onClick={() => onSelectScope('project')}>作品剧本</button>
       <button aria-pressed={scriptScope === 'episode' && !!episode} disabled={busy || !episode}
-        onClick={() => { if (scriptScope !== 'episode') onSelectScope('episode') }}>集数剧本</button>
+        onClick={() => onSelectScope('episode')}>集数剧本</button>
     </div></div>
     {activeScope === 'episode' && episode
       ? <TextEditor key={episode.id + editorRevision} title={episode.title} name={episode.title} script={episode.script} field="剧本" busy={busy}
-          onDirty={onDirty} onSave={onSaveEpisode} onRemove={onRemoveEpisode} extraActions={renderActions} />
+          onDirty={onDirty} onSave={onSaveEpisode} onCopyDraft={onCopyDraft} onRemove={onRemoveEpisode} extraActions={renderActions} />
       : <TextEditor key={project.id + editorRevision} title={project.title} name={project.title} script={project.script} field="剧本"
-          busy={busy} onDirty={onDirty} onSave={onSaveProject} extraActions={renderActions} />}
+          busy={busy} onDirty={onDirty} onSave={onSaveProject} onCopyDraft={onCopyDraft} extraActions={renderActions} />}
   </main>
 }
 

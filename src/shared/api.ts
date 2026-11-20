@@ -9,7 +9,8 @@ export interface OpenProject {
   directory: string
 }
 
-export type Reply<T> = { ok: true; value: T } | { ok: false; error: string; code?: 'update-package-invalid' | 'update-manual-required' | 'upgrade-canceled' }
+export type ReplyError = { ok: false; error: string; code?: 'update-package-invalid' | 'update-manual-required' | 'upgrade-canceled' | 'project-conflict' }
+export type Reply<T> = { ok: true; value: T } | ReplyError
 export type RecentProject = { id: string; title: string; directory: string; fictional: boolean }
 export type Tool = GenerationKind | 'planning'
 export type RenderProgress = { mode: 'preview' | 'export'; percent: number }
