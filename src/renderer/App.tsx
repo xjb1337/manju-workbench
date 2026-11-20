@@ -10,6 +10,7 @@ import { AiSettingsDialog, sameGateway, ScriptAiDialog, type AiPanelOptions, typ
 import { Badge, Modal, NameModal, PreviewPlayer, kindLabel } from './components'
 import { BriefPanel, DetailDialog, PlanImportDialog, PlanningDialog } from './CreativePanels'
 import { Inspector } from './Inspector'
+import { FfmpegPanel } from './FfmpegPanel'
 import { MusicPanel } from './MusicPanel'
 import { PreflightPanel } from './PreflightPanel'
 import { ProductionGuide, isShotStep } from './ProductionGuide'
@@ -63,6 +64,7 @@ export function App() {
   const [checking, setChecking] = useState(false)
   const [player, setPlayer] = useState('')
   const [musicOpen, setMusicOpen] = useState(false)
+  const [ffmpegOpen, setFfmpegOpen] = useState(false)
   const [message, setMessage] = useState<{ text: string; error?: boolean } | null>(null)
   const [ask, setAsk] = useState<Ask | null>(null)
   const [upgradeRequest, setUpgradeRequest] = useState<string | null>(null)
@@ -153,7 +155,7 @@ export function App() {
     shotIndex,
     busy,
     dirty,
-    hasModalOpen: Boolean(ask || creativeDialog || progress || checking || player || aiSettingsOpen || scriptAi || musicOpen),
+    hasModalOpen: Boolean(ask || creativeDialog || progress || checking || player || aiSettingsOpen || scriptAi || musicOpen || ffmpegOpen),
     onSelectShot: selectShot,
   })
 
@@ -541,6 +543,7 @@ export function App() {
           <SlidersHorizontal size={17} />
           <span>AI 设置</span>
         </button>
+        <button className="subtle" onClick={() => setFfmpegOpen(true)} disabled={busy}>FFmpeg 设置</button>
         <UpdatePanel busy={busy} dirty={dirty} />
         <button className="icon subtle" aria-label={dark ? '切换浅色' : '切换深色'} title={dark ? '切换浅色' : '切换深色'}
           onClick={() => setDark(!dark)}>{dark ? <Sun size={19} /> : <Moon size={19} />}</button>
@@ -744,6 +747,7 @@ export function App() {
       {message?.error && <p className="inline-error" role="alert">{message.text}</p>}
       <div className="dialog-actions"><button onClick={() => setPlayer('')}>关闭预览</button></div>
     </Modal>}
+    {ffmpegOpen && <FfmpegPanel onClose={() => setFfmpegOpen(false)} />}
     {aiSettingsOpen && <AiSettingsDialog config={aiConfig} probe={gatewayProbe} busy={busy}
       onEndpointChange={() => setGatewayProbe(null)}
       onTest={next => void run(() => api.testAiConnection(next),

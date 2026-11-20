@@ -26,6 +26,7 @@ const preferencesSchema = z.object({
   theme: themeSchema.optional(),
   windowBounds: windowBoundsSchema.optional(),
   aiGateway: aiGatewayConfigSchema.optional().catch(undefined),
+  ffmpegDirectory: absolutePath.optional().catch(undefined),
 })
 
 function sameDirectory(a: string, b: string) {
@@ -59,6 +60,18 @@ export class RecentProjects {
 
   get aiGateway(): AiGatewayConfig {
     return this.preferences.aiGateway ? { ...this.preferences.aiGateway } : { ...defaultAiGatewayConfig }
+  }
+
+  get ffmpegDirectory() {
+    return this.preferences.ffmpegDirectory ?? null
+  }
+
+  async setFfmpegDirectory(directory: string | null) {
+    const next = directory === null ? undefined : absolutePath.parse(directory)
+    await this.queueSave(async () => {
+      await atomicJson(this.file, { ...this.preferences, ffmpegDirectory: next })
+      this.preferences.ffmpegDirectory = next
+    })
   }
 
   async setAiGateway(config: AiGatewayConfig, resolve?: GatewayLookup) {

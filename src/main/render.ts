@@ -1,15 +1,18 @@
 import { createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { copyFile, link, lstat, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { availableParallelism, tmpdir } from 'node:os'
 import path from 'node:path'
+import { Readable } from 'node:stream'
 import { audibleMusic, shotMedia, shotVisual, folderNameSchema, totalFrames, visualMotion, type Episode, type Shot, type ShotMotion } from '../shared/model'
 import { frameSpec, shotMethod, usesFinishedVideo, type FrameSpec } from '../shared/creative'
 import type { Project } from '../shared/model'
-import { mediaInput, probe, runTool } from './process'
+import { ffmpegTools, mediaInput, probe, runTool } from './process'
 import { checkedFile, fileFingerprint, type ProjectStore } from './storage'
 
 const fps = 30
 const sampleRate = 48_000
+const stereoSampleBytes = 4
 const cjkUnit = 100
 const asciiUnit = 55
 const shotCacheVersion = 'shot-cache-v3'
@@ -252,7 +255,7 @@ async function shotCacheKey(spec: FrameSpec, shot: Shot, inputs: ShotInputs, duc
       hash: voiceHash,
     } : null,
     embeddedAudio,
-    ...(duckTrack && { duckTrack }),
+    ...(duckTrack && { duckTrack: 'stereo' }),
     ...(motion !== 'off' && { motion }),
   })).digest('hex')
 }
@@ -350,8 +353,8 @@ async function encodeShot(
   const audioInput = embeddedAudio ? '0:a:0' : '1:a:0'
   // Only independently imported narration controls the gain. Picture sound stays in the dry mix.
   const audioOutput = duckTrack ? [
-    '-filter_complex', `[${audioInput}]${audioFilter},asplit[dry][detector];[detector]aformat=channel_layouts=mono${voice ? '' : ',volume=0'}[duck]`,
-    '-map', '[dry]', '-map', '[duck]', '-ac:a:1', '1',
+    '-filter_complex', `[${audioInput}]${audioFilter},asplit[dry][detector];[detector]aformat=channel_layouts=stereo${voice ? '' : ',volume=0'}[duck]`,
+    '-map', '[dry]', '-map', '[duck]',
   ] : ['-map', audioInput, '-af', audioFilter]
   const totalUs = (shot.frames / fps) * 1_000_000
   await runTool('ffmpeg', [
@@ -406,22 +409,68 @@ export async function writeEpisodeSrt(destination: string, episode: Episode, spe
   }
 }
 
-function musicMix(music: NonNullable<Episode['music']>, frames: number) {
-  const samples = frames * (sampleRate / fps)
-  const fadeIn = Math.min(samples, Math.round(music.fadeIn * sampleRate))
-  const fadeOut = Math.min(samples, Math.round(music.fadeOut * sampleRate))
-  const musicFilters = [
-    `aresample=${sampleRate}:first_pts=0`, 'asetpts=N/SR/TB', 'aformat=channel_layouts=stereo',
-    `atrim=end_sample=${samples}`,
-    ...(fadeIn ? [`afade=t=in:ns=${fadeIn}`] : []),
-    ...(fadeOut ? [`afade=t=out:ss=${samples - fadeOut}:ns=${fadeOut}`] : []),
-    `volume=${music.volume}`,
-  ]
-  return [
-    `[1:a:0]${musicFilters.join(',')}[music]`,
-    '[music][0:a:1]sidechaincompress=threshold=0.009:ratio=12:attack=15:release=250:makeup=1[ducked]',
-    `[0:a:0][ducked]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.97:level=false:latency=true,apad,atrim=end_sample=${samples}[mix]`,
-  ].join(';')
+async function* repeatMusic(file: string, size: number, remaining: number, signal: AbortSignal) {
+  const blockSize = 64 * 1024
+  if (size < blockSize) {
+    // Fill whole repetitions so even a very short soundtrack stays aligned to sample boundaries.
+    const loop = await readFile(file, { signal })
+    const block = Buffer.alloc(Math.floor(blockSize / size) * size, loop)
+    for (; remaining > 0; remaining -= block.length) {
+      signal.throwIfAborted()
+      yield block.subarray(0, Math.min(remaining, block.length))
+    }
+    return
+  }
+  for (; remaining > 0; remaining -= size) {
+    yield* createReadStream(file, { end: Math.min(remaining, size) - 1, highWaterMark: blockSize, signal })
+  }
+}
+
+async function readSamples(file: Awaited<ReturnType<typeof open>>, buffer: Buffer, length: number, position: number) {
+  for (let offset = 0; offset < length;) {
+    const { bytesRead } = await file.read(buffer, offset, length - offset, position + offset)
+    if (!bytesRead) throw new Error('镜头音轨时长校验失败')
+    offset += bytesRead
+  }
+}
+
+async function* mixedTracks(
+  workDir: string, musicFile: string, musicSize: number, music: NonNullable<Episode['music']>, samples: number, signal: AbortSignal,
+) {
+  await using dry = await open(path.join(workDir, 'dry.pcm'), 'r')
+  await using voice = await open(path.join(workDir, 'voice.pcm'), 'r')
+  const attack = 1 - Math.exp(-1 / (0.015 * sampleRate))
+  const release = 1 - Math.exp(-1 / (0.25 * sampleRate))
+  const fadeIn = Math.round(music.fadeIn * sampleRate)
+  const fadeOut = Math.round(music.fadeOut * sampleRate)
+  const threshold = 0.009
+  let envelope = 0
+  let position = 0
+  const dryBlock = Buffer.alloc(64 * 1024)
+  const voiceBlock = Buffer.alloc(dryBlock.length)
+  for await (const musicBlock of repeatMusic(musicFile, musicSize, samples * stereoSampleBytes, signal)) {
+    signal.throwIfAborted()
+    await Promise.all([
+      readSamples(dry, dryBlock, musicBlock.length, position),
+      readSamples(voice, voiceBlock, musicBlock.length, position),
+    ])
+    const mixed = Buffer.alloc(musicBlock.length)
+    for (let offset = 0; offset < musicBlock.length; offset += stereoSampleBytes) {
+      const sample = (position + offset) / stereoSampleBytes
+      const peak = Math.max(Math.abs(voiceBlock.readInt16LE(offset)), Math.abs(voiceBlock.readInt16LE(offset + 2))) / 32768
+      envelope += (peak - envelope) * (peak > envelope ? attack : release)
+      const duck = envelope > threshold ? Math.pow(threshold / envelope, 11 / 12) : 1
+      const fade = Math.min(1, fadeIn ? sample / fadeIn : 1, fadeOut ? (samples - sample) / fadeOut : 1)
+      const gain = music.volume * duck * fade
+      const left = dryBlock.readInt16LE(offset) + musicBlock.readInt16LE(offset) * gain
+      const right = dryBlock.readInt16LE(offset + 2) + musicBlock.readInt16LE(offset + 2) * gain
+      const limit = Math.max(1, Math.abs(left) / 32767, Math.abs(right) / 32767)
+      mixed.writeInt16LE(Math.round(left / limit), offset)
+      mixed.writeInt16LE(Math.round(right / limit), offset + 2)
+    }
+    position += musicBlock.length
+    yield mixed
+  }
 }
 
 export async function renderEpisode(
@@ -437,15 +486,31 @@ export async function renderEpisode(
   const spec = frameSpec(project)
   const { width, height } = spec
   if (!episode.shots.length) throw new Error('请先新建镜头')
+  await ffmpegTools.requireReady()
   let workDir: string | undefined
   let publishDir: string | undefined
   try {
     workDir = await mkdtemp(path.join(tmpdir(), 'manju-render-work-'))
     publishDir = await mkdtemp(path.join(path.dirname(destination), '.manju-render-'))
     const total = totalFrames(episode)
+    const totalSamples = total * (sampleRate / fps)
     const music = audibleMusic(episode)
     const musicPath = music && await store.assetPath(music.version)
     const musicHash = musicPath && await fileFingerprint(musicPath, options.signal)
+    let soundtrack: { file: string; size: number } | undefined
+    if (musicPath) {
+      // Decode one pass. Feed exactly the requested samples so container and demuxer loop timestamps cannot interrupt the mix.
+      const normalizedMusic = path.join(workDir, 'music.pcm')
+      await runTool('ffmpeg', [
+        '-nostdin', '-v', 'error', '-xerror', '-abort_on', 'empty_output_stream',
+        ...mediaInput(musicPath, music.version.extension), '-map', '0:a:0',
+        '-af', `aresample=${sampleRate}:first_pts=0,asetpts=N/SR/TB,atrim=end_sample=${totalSamples}`,
+        '-c:a', 'pcm_s16le', '-ac', '2', '-ar', String(sampleRate), '-f', 's16le', normalizedMusic,
+      ], { signal: options.signal })
+      const { size } = await checkedFile(normalizedMusic)
+      if (!size || size % stereoSampleBytes) throw new Error('背景音乐解码失败')
+      soundtrack = { file: normalizedMusic, size }
+    }
     const files = episode.shots.map((_, i) => `shot-${i}.mov`)
     const shotProgress = new Array<number>(episode.shots.length).fill(0)
     const batchController = new AbortController()
@@ -519,24 +584,31 @@ export async function renderEpisode(
       `duration ${seconds(shot.frames)}`,
     ])]
     await writeFile(path.join(workDir, 'episode.ffconcat'), manifest.join('\n') + '\n')
+    const timelineInput = ['-protocol_whitelist', 'file,pipe', '-f', 'concat', '-safe', '1', '-i', 'episode.ffconcat']
+    let musicInput: Readable | undefined
+    if (music && soundtrack) {
+      // Read the two shot tracks independently. Both contain exactly one block per picture frame.
+      const tracks = ['0:a:0', '0:a:1'].flatMap((track, index) => [
+        '-map', track, '-c:a', 'pcm_s16le', '-f', 's16le', index ? 'voice.pcm' : 'dry.pcm',
+      ])
+      await runTool('ffmpeg', ['-nostdin', '-v', 'error', '-xerror', ...timelineInput, ...tracks], {
+        cwd: workDir, signal: options.signal,
+      })
+      musicInput = Readable.from(mixedTracks(workDir, soundtrack.file, soundtrack.size, music, totalSamples, options.signal))
+    }
     const complete = path.join(publishDir, 'complete.mp4')
     await runTool('ffmpeg', [
-      '-nostdin', '-v', 'error', '-xerror', '-protocol_whitelist', 'file,pipe',
-      '-f', 'concat', '-safe', '1', '-i', 'episode.ffconcat',
-      ...(music && musicPath ? ['-stream_loop', '-1', ...mediaInput(musicPath, music.version.extension)] : []),
-      '-map', '0:v:0',
-      ...(music ? [
-        '-filter_complex_threads', '2', '-filter_complex', musicMix(music, total), '-map', '[mix]',
-        '-t', seconds(total),
-      ] : ['-map', '0:a:0']),
-      '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+      '-nostdin', '-v', 'error', '-xerror', ...timelineInput,
+      ...(musicInput ? ['-protocol_whitelist', 'pipe', '-f', 's16le', '-ar', String(sampleRate), '-ac', '2', '-i', 'pipe:0'] : []),
+      '-map', '0:v:0', '-map', musicInput ? '1:a:0' : '0:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
       '-map_metadata', '-1', '-map_chapters', '-1', '-movflags', '+faststart', '-f', 'mp4', complete,
-    ], { cwd: workDir, signal: options.signal })
+    ], { cwd: workDir, signal: options.signal, input: musicInput })
     const info = await probe(complete, 'mp4', options.signal)
     const video = info.streams.find(stream => stream.codec_type === 'video')
     const audio = info.streams.find(stream => stream.codec_type === 'audio')
     if (video?.codec_name !== 'h264' || video.width !== width || video.height !== height
-      || audio?.codec_name !== 'aac' || Math.abs(Number(info.format.duration ?? 0) - total / fps) > 0.10) {
+      || audio?.codec_name !== 'aac' || Math.abs(Number(info.format.duration ?? 0) - total / fps) > 0.10
+      || (music && (Number(video.nb_frames) !== total || Math.abs((Number(audio.duration) || 0) - total / fps) > 0.004))) {
       throw new Error('成片的音视频轨或时长校验失败')
     }
     await checkedFile(complete)

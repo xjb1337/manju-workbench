@@ -4,14 +4,14 @@
 
 ## 启动
 
-需要 Node.js 24、npm 和图形桌面。将 FFmpeg 7.1 或更高版本的 `ffmpeg`、`ffprobe` 放入 PATH。FFmpeg 构建需包含 libx264、AAC 编码和 libass，并能找到中文字体。Windows 默认选用 Microsoft YaHei，Linux 默认选用 Noto Sans CJK SC。
+需要 Node.js 24、npm 和图形桌面。手动安装 FFmpeg 7.1 或更高版本。在「FFmpeg 设置」可查看 `ffmpeg` 和 `ffprobe` 的检测状态与版本，使用系统 PATH，或选择同时包含两者的可信工具目录并重新检测。应用识别正式的数字版本号。FFmpeg 构建需包含 libx264、AAC 编码和 libass，并能找到中文字体。Windows 默认选用 Microsoft YaHei，Linux 默认选用 Noto Sans CJK SC。
 
 ```sh
 npm ci
 npm run dev
 ```
 
-生产构建成功后可直接运行 `npm start`。使用 Windows 安装包或便携包也需另行安装 FFmpeg，并将 `ffmpeg` 和 `ffprobe` 加入系统 PATH。
+生产构建成功后可直接运行 `npm start`。Windows 安装包和便携包也使用上述独立安装的 FFmpeg 工具。
 
 ## 1.4.0 发布说明
 
@@ -83,6 +83,8 @@ xvfb-run -a -s '-screen 0 1600x1050x24' npm run verify:desktop
 
 ## Windows x64 打包
 
+`Package Windows x64` 工作流可在 GitHub Actions 手动运行。它构建自定义 NSIS Setup 和 Portable，并将这两个包、更新清单及 SHA-256 文本上传为 Actions artifacts。生成的包未签名，工作流以 `--publish never` 运行。
+
 `npm run pack:win` 调用 Electron Builder 的标准 NSIS 目标。在当前 Linux 环境中，该目标因缺少可用 Wine 而无法完成。用于应用内覆盖更新的 Setup 由本仓库的自定义 NSIS 脚本生成。Linux 上先构建解包目录，再使用缓存中的 Linux 版 `makensis` 编译该脚本。
 
 ```sh
@@ -101,6 +103,8 @@ npx electron-builder --win portable --x64
 ## 更新发布清单
 
 标题栏的「检查更新」按需读取 `xjb1337/manju-workbench` 的正式 GitHub Release。1.4.0 的标签可使用 `1.4.0` 或 `v1.4.0`。随 Release 提供 `Manju-Workbench-1.4.0-win-x64.manifest.json`（UTF-8 JSON），所有更新附件的下载地址必须逐字匹配 `https://github.com/xjb1337/manju-workbench/releases/download/<tag>/<fileName>`。
+
+GitHub 限流、HTTP 403 或网络失败时，可用「打开发布页」在系统浏览器打开仓库的官方最新 Release 页。该入口用于手动更新。请按该发布的清单核对 SHA-256 和文件大小。应用内下载和安装资格仍以正式 Release 的来源、大小与哈希校验为准。
 
 官方 Setup 安装版会校验当前程序的规范目录、安装标识与当前用户注册表。安装确认会显示目标目录，Setup 会锁定并再次核验该目录。注册信息缺失、指向其他目录或无法核验时，应从发布页手动更新。便携版与其他打包的 Windows x64 目录可下载便携包并自行替换。已校验的便携包保留在系统临时目录。
 

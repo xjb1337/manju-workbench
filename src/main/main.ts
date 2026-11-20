@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, protocol, screen, session, shell } from 'electron'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -14,12 +14,14 @@ import { generateAiTextDraft, generateMagpiePlan, testAiGateway } from './magpie
 import { describeAiGateway } from './ai-gateway'
 import { mediaResponse } from './media-protocol'
 import { inspectEpisode, preflightAllows } from './preflight'
+import { ffmpegTools } from './process'
 import { exportDestination, renderEpisode, writeEpisodeSrt } from './render'
 import { fillSample, fillVerticalSample } from './sample'
 import { RecentProjects, themeSchema, type WindowBounds } from './recent-projects'
 import { WorkbenchSession } from './session'
 import { findEpisode, findShot, OrphanMediaPreviewError, ProjectConflictError, ProjectStore } from './storage'
 import { cleanupStaleTempDirs, staleTempAgeMs, staleTempPrefixes } from './temp-cleanup'
+import { openOfficialReleasePage } from './update-release'
 import { createProductionUpdater } from './update-system'
 import { InvalidUpdatePackageError, ManualUpdateRequiredError, type Updater } from './updater'
 import { resolveInitialBounds, themeBackground } from './window-state'
@@ -112,6 +114,23 @@ function handle<T>(channel: string, fn: (win: BrowserWindow, ...args: unknown[])
 
 function wire() {
   handle('app:editor-dirty', (_win, value) => { workbench.editorDirty = z.boolean().parse(value); return null })
+  handle('ffmpeg:detect', () => workbench.serial(() => ffmpegTools.refresh()))
+  handle('ffmpeg:choose-directory', win => workbench.serial(async () => {
+    const selected = await dialog.showOpenDialog(win, {
+      title: '选择可信的 FFmpeg 工具目录', properties: ['openDirectory'],
+      defaultPath: recent.ffmpegDirectory ?? undefined,
+    })
+    if (selected.canceled || !selected.filePaths[0]) return null
+    const directory = await realpath(selected.filePaths[0])
+    await recent.setFfmpegDirectory(directory)
+    ffmpegTools.configure(directory)
+    return ffmpegTools.refresh()
+  }))
+  handle('ffmpeg:use-path', () => workbench.serial(async () => {
+    await recent.setFfmpegDirectory(null)
+    ffmpegTools.configure(null)
+    return ffmpegTools.refresh()
+  }))
   handle('app:set-theme', async (win, value) => {
     const theme = themeSchema.parse(value)
     if (!win.isDestroyed()) win.setBackgroundColor(themeBackground(theme))
@@ -124,7 +143,7 @@ function wire() {
   }))
   handle('update:cancel', () => updater.cancel())
   handle('update:open-releases', async () => {
-    await shell.openExternal('https://github.com/xjb1337/manju-workbench/releases')
+    await openOfficialReleasePage(url => shell.openExternal(url))
     return null
   })
   handle('update:open-folder', async () => {
@@ -506,6 +525,7 @@ if (app.requestSingleInstanceLock()) {
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
     updater = createProductionUpdater()
     recent = await RecentProjects.open(app.getPath('userData'))
+    ffmpegTools.configure(recent.ffmpegDirectory)
     wire()
     createWindow()
     void cleanupStaleTempDirs(tmpdir(), staleTempPrefixes, staleTempAgeMs)

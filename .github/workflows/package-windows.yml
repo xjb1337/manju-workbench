@@ -1,0 +1,61 @@
+name: Package Windows x64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/manju-builder-cache
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run verify:update
+      - run: npm run build
+      - name: Build Portable and unpacked app
+        run: npx.cmd --no-install electron-builder --win portable --x64 --publish never
+      - name: Build Setup and write checksums
+        id: packages
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $prefix = "Manju-Workbench-$version"
+          $setup = "release/$prefix-x64-Setup.exe"
+          $portable = "release/$prefix-x64-Portable.exe"
+          $manifest = "release/$prefix-win-x64.manifest.json"
+          $hash = "release/$prefix-win-x64.sha256.txt"
+          $compilers = @(Get-ChildItem -LiteralPath $env:ELECTRON_BUILDER_CACHE -Filter makensis.exe -File -Recurse |
+            Where-Object { $_.Directory.Name -eq 'Bin' -and
+              (Test-Path -LiteralPath (Join-Path $_.Directory.Parent.FullName 'Include/MUI2.nsh') -PathType Leaf) })
+          if ($compilers.Count -ne 1) { throw 'Expected one NSIS compiler from the Electron Builder cache.' }
+          $compiler = $compilers[0].FullName
+          node scripts/pack-native.cjs $compiler release/win-unpacked $setup
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/write-update-manifest.cjs --sha256 $setup $portable
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($file in @($setup, $portable, $manifest, $hash)) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing artifact $file" }
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Manju-Workbench-${{ steps.packages.outputs.version }}-win-x64
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            release/Manju-Workbench-${{ steps.packages.outputs.version }}-x64-Setup.exe
+            release/Manju-Workbench-${{ steps.packages.outputs.version }}-x64-Portable.exe
+            release/Manju-Workbench-${{ steps.packages.outputs.version }}-win-x64.manifest.json
+            release/Manju-Workbench-${{ steps.packages.outputs.version }}-win-x64.sha256.txt

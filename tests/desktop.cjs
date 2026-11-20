@@ -465,7 +465,31 @@ async function verifyUpdates(folder, project) {
     await screenshot(page, 'update-02-no-release.png')
     await button(panel, '关闭').click()
 
-    Object.assign(server.state, { releases: [fixture.release], paths: fixture.paths, stalledPath: fixture.assetPath })
+    server.state.releases = [releaseFixture({ version }).release]
+    await button(page, '检查更新').click()
+    await panel.getByText('已是最新版本', { exact: true }).waitFor()
+    for (const [failure, status] of [
+      ['offline', '更新网络连接失败'], ['forbidden', 'GitHub 拒绝更新请求（HTTP 403）'], ['rate-limited', 'GitHub 更新检查已限流'],
+    ]) {
+      server.state.releaseFailure = failure
+      await button(panel, '重新检查').click()
+      await panel.getByText(status, { exact: true }).waitFor()
+      await panel.getByText(/手动下载后.*SHA-256/).waitFor()
+      assert.equal(await button(panel, '下载').count(), 0)
+      assert.equal(await button(panel, '安装').count(), 0)
+    }
+    await screenshot(page, 'feature-update-rate-limit.png')
+    await app.evaluate(({ shell }) => {
+      const open = shell.openExternal
+      shell.openExternal = async () => { shell.openExternal = open; throw new Error('虚构系统浏览器打开失败') }
+    })
+    await button(panel, '打开发布页').click()
+    await panel.getByRole('alert').getByText('无法打开官方发布页', { exact: true }).waitFor()
+    await screenshot(page, 'feature-update-fallback-error.png')
+    assert.equal(await panel.getByText(/已通过完整性校验/).count(), 0)
+    await button(panel, '关闭').click()
+
+    Object.assign(server.state, { releases: [fixture.release], paths: fixture.paths, stalledPath: fixture.assetPath, releaseFailure: '' })
     async function checkNewVersion() {
       await button(page, '检查更新').click()
       await panel.getByText(`发现新版本 ${futureVersion}`, { exact: true }).waitFor()
@@ -543,7 +567,7 @@ async function verifyUpdates(folder, project) {
     assert.deepEqual(await app.evaluate(() => globalThis.updateLaunches), [])
     await screenshot(page, 'feature-update-manual-fallback.png')
     await button(panel, '打开发布页').click()
-    assert.deepEqual(await app.evaluate(() => globalThis.openedUrls), ['https://github.com/xjb1337/manju-workbench/releases'])
+    assert.deepEqual(await app.evaluate(() => globalThis.openedUrls), ['https://github.com/xjb1337/manju-workbench/releases/latest'])
     console.log('更新夹具验收通过：无后台检查，暂无发布，发现新版本，纯文本说明，下载取消及校验，安装确认取消，未保存修改保护')
   } catch (error) {
     await desktop?.page.screenshot({ path: path.join(folder, 'diagnostic-update-failure.png'), timeout: 3000 }).catch(() => {})
@@ -1045,6 +1069,25 @@ async function main() {
       return [prefs.sandbox, prefs.contextIsolation, prefs.nodeIntegration, prefs.webSecurity]
     }), [true, true, false, true])
     await screenshot(page, '01-empty-light.png')
+    await button(page, 'FFmpeg 设置').click()
+    const tools = page.getByRole('dialog', { name: 'FFmpeg 设置', exact: true })
+    await tools.getByText('系统 PATH', { exact: true }).waitFor()
+    assert.equal(await tools.getByText('可用', { exact: true }).count(), 2)
+    assert.equal(await tools.getByRole('list', { name: '工具状态' }).getByText(/^n?\d+\.\d+/).count(), 2)
+    await screenshot(page, 'feature-ffmpeg-path.png')
+    const emptyTools = path.join(folder, '空工具 目录')
+    await mkdir(emptyTools)
+    await choose(app, emptyTools)
+    await button(tools, '选择工具目录').click()
+    await tools.getByText(emptyTools, { exact: true }).waitFor()
+    assert.equal(await tools.getByText('未找到', { exact: true }).count(), 2)
+    assert.equal((await documentAt(path.join(profile, 'workbench-preferences.json'))).ffmpegDirectory, emptyTools)
+    await screenshot(page, 'feature-ffmpeg-missing.png')
+    await button(tools, '重新检测').click()
+    await button(tools, '使用 PATH').click()
+    await tools.getByText('系统 PATH', { exact: true }).waitFor()
+    assert.equal(await tools.getByText('可用', { exact: true }).count(), 2)
+    await button(tools, '关闭').click()
     await choose(app, parent)
     await named(page, '创建虚构示例', '雾港来信', '选择保存位置')
     await page.getByText('示例 / 虚构', { exact: true }).waitFor()
@@ -1084,6 +1127,7 @@ async function main() {
       await button(fallback, '继续导出').click()
       await fallback.getByRole('region', { name: '阻断', exact: true }).waitFor()
       assert.equal(await button(fallback, '继续导出').count(), 0)
+      await screenshot(page, 'feature-preflight-blocked.png')
       await fallback.getByRole('button', { name: /镜头 03.*参考图 · 素材文件不存在/ }).click()
       await page.waitForFunction(() => document.activeElement?.id === 'shot-import-image')
       await stage(page).getByText(/镜头 03 · /).waitFor()

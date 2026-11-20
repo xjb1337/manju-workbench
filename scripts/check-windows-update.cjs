@@ -52,9 +52,12 @@ try {
     writeFileSync(path.join(fixture, fileName), content)
     return { fileName, size: content.length, sha256: createHash('sha256').update(content).digest('hex'), kind }
   })
-  execFileSync(process.execPath, [path.join(__dirname, 'write-update-manifest.cjs'), ...assets.map(asset => path.join(fixture, asset.fileName))])
+  execFileSync(process.execPath, [path.join(__dirname, 'write-update-manifest.cjs'), '--sha256',
+    ...assets.map(asset => path.join(fixture, asset.fileName))])
   const manifest = path.join(fixture, `Manju-Workbench-${version}-win-x64.manifest.json`)
   assert.deepEqual(JSON.parse(readFileSync(manifest, 'utf8')), { schemaVersion: 1, version, assets })
+  const hashes = path.join(fixture, `Manju-Workbench-${version}-win-x64.sha256.txt`)
+  assert.equal(readFileSync(hashes, 'utf8'), assets.map(asset => `${asset.sha256}  ${asset.fileName}\n`).join(''))
 } finally {
   rmSync(fixture, { recursive: true, force: true })
 }

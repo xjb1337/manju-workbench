@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { PreflightIssue, PreflightReport } from '../shared/api'
 import { frameSpec, usesTrack } from '../shared/creative'
 import { audibleMusic, totalFrames, type Episode, type Project, type Version } from '../shared/model'
-import { mediaInput, probe, runTool } from './process'
+import { ffmpegTools, mediaInput, probe, runTool } from './process'
 import { shotSources, subtitleCues } from './render'
 import type { ProjectStore } from './storage'
 
@@ -10,6 +10,7 @@ type MediaCheck = { error: 'missing-file' | 'unreadable' } | { embeddedAudio: bo
 
 export async function inspectEpisode(store: ProjectStore, project: Project, episode: Episode, signal: AbortSignal): Promise<PreflightReport> {
   await store.assertDiskCurrent()
+  if (episode.shots.length) await ffmpegTools.requireReady()
   const spec = frameSpec(project)
   const checks = new Map<string, Promise<MediaCheck>>()
   function checkMedia(version: Version, kind: 'video' | 'image' | 'audio', frames: number, checkVideoAudio = false) {

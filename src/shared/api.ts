@@ -30,13 +30,22 @@ export type RenderResult =
   | { status: 'completed'; mode: 'export'; location: string; project: Project }
   | { status: 'record-failed'; location: string }
 export type UpdateKind = 'setup' | 'portable'
+export type UpdateConnectionStatus = 'offline' | 'forbidden' | 'rate-limited'
 export type UpdateCheck = { currentVersion: string } & (
   | { status: 'none' }
+  | { status: UpdateConnectionStatus }
   | { status: 'latest'; version: string; notes: string }
   | { status: 'available'; version: string; notes: string; kind: UpdateKind | null; unavailable?: string; manual?: true; directory?: string }
 )
 export type UpdateProgress = { received: number; total: number }
 export type UpdateDownload = { status: 'canceled' } | { status: 'ready'; fileName: string }
+export type FfmpegToolName = 'ffmpeg' | 'ffprobe'
+export type FfmpegToolStatus = {
+  name: FfmpegToolName
+  status: 'ready' | 'missing' | 'outdated' | 'unknown-version' | 'unavailable'
+  version?: string
+}
+export type FfmpegStatus = { directory: string | null; tools: FfmpegToolStatus[] }
 export type OrphanMediaReport = { count: number; bytes: number }
 export type OrphanMediaPreview = OrphanMediaReport & { token: string; files: string[] }
 export interface Workbench {
@@ -84,4 +93,7 @@ export interface Workbench {
   onUpdateProgress(listener: (event: UpdateProgress) => void): () => void
   setEditorDirty(dirty: boolean): Promise<Reply<null>>
   setTheme(theme: 'light' | 'dark'): Promise<Reply<null>>
+  detectFfmpeg(): Promise<Reply<FfmpegStatus>>
+  chooseFfmpegDirectory(): Promise<Reply<FfmpegStatus | null>>
+  useFfmpegPath(): Promise<Reply<FfmpegStatus>>
 }

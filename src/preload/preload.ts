@@ -70,5 +70,8 @@ const bridge: Workbench = {
   },
   setEditorDirty: dirty => ipcRenderer.invoke('app:editor-dirty', dirty),
   setTheme: theme => ipcRenderer.invoke('app:set-theme', theme),
+  detectFfmpeg: () => ipcRenderer.invoke('ffmpeg:detect'),
+  chooseFfmpegDirectory: () => ipcRenderer.invoke('ffmpeg:choose-directory'),
+  useFfmpegPath: () => ipcRenderer.invoke('ffmpeg:use-path'),
 }
 contextBridge.exposeInMainWorld('workbench', bridge)
