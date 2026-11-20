@@ -439,6 +439,10 @@ export class ProjectStore {
     return structuredClone(this.document)
   }
 
+  async assertDiskCurrent() {
+    await this.assertCurrent(path.join(this.root, projectFilename))
+  }
+
   private queue<T>(work: () => Promise<T>): Promise<T> {
     const result = this.tail.then(work)
     this.tail = result.catch(() => {})
@@ -464,11 +468,11 @@ export class ProjectStore {
     }
   }
 
-  private async assertCurrent(file: string, assertLock: () => void) {
+  private async assertCurrent(file: string, assertLock?: () => void) {
     if (await readProjectFile(file) !== this.savedJson) {
       throw new ProjectConflictError('磁盘上的作品已变更，请重新打开作品后再保存')
     }
-    assertLock()
+    assertLock?.()
   }
 
   private async commit(next: Project, file: string, assertLock: () => void) {

@@ -15,8 +15,9 @@ export function Badge({ value }: { value: string }) {
   return <span className={`badge ${color}`}>{value}</span>
 }
 
-export function MediaRow({ track, kind, opened, busy, onImport, onActivate, onKeep, onRemove, onDropFile }: {
+export function MediaRow({ track, kind, opened, busy, importId, keepId, onImport, onActivate, onKeep, onRemove, onDropFile }: {
   track: Track; kind: MediaKind; opened?: OpenProject; busy: boolean; onImport: () => void
+  importId?: string; keepId?: string
   onActivate: (id: string) => void; onKeep: (id: string) => void
   onRemove?: (id: string) => void; onDropFile?: (file: File) => void
 }) {
@@ -73,12 +74,12 @@ export function MediaRow({ track, kind, opened, busy, onImport, onActivate, onKe
     {active && onRemove && <button type="button" className="small icon subtle danger media-remove"
       title={`删除${kindLabel[kind]}当前版本`} aria-label={`删除${kindLabel[kind]}当前版本`}
       disabled={busy} onClick={() => onRemove(active.id)}><Trash size={14} /></button>}
-    <button type="button" className="small subtle import" aria-label={`导入${kindLabel[kind]}`} disabled={busy} onClick={onImport}>
+    <button type="button" id={importId} className="small subtle import" aria-label={`导入${kindLabel[kind]}`} disabled={busy} onClick={onImport}>
       <UploadSimple size={15} /> 导入
     </button>
   </div>{active?.needsUpdate && <div className="media-review">
     <Badge value="需更新" />
-    <button type="button" className="small subtle" aria-label={`保留此版本 · ${kindLabel[kind]}`} disabled={busy}
+    <button type="button" id={keepId} className="small subtle" aria-label={`保留此版本 · ${kindLabel[kind]}`} disabled={busy}
       onClick={() => onKeep(active.id)}>保留此版本</button>
   </div>}</div>
 }

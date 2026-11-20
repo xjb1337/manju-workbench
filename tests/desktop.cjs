@@ -924,6 +924,10 @@ async function verifyCreative(folder, parent, profile) {
     await selectStep(page, 'export')
     await choose(app, destination, 'saveChoices')
     await button(guide(page), '导出 MP4').click()
+    const recheck = page.getByRole('dialog', { name: '成片检查', exact: true })
+    await recheck.getByText('视频 · 素材需更新', { exact: true }).first().waitFor()
+    assert.equal(await recheck.getByRole('region', { name: '阻断', exact: true }).count(), 0)
+    await button(recheck, '继续导出').click()
     await page.getByText(/导出完成/).waitFor({ timeout: 45_000 })
     await guideStatus(page, 'export', '已完成')
     console.log('竖屏验收成片', destination, '720 × 1280 / 180 帧')
@@ -1062,11 +1066,33 @@ async function main() {
     await button(page, '关闭预览').click()
     await guideStatus(page, 'export', '待完成')
     assert.deepEqual(await documentAt(sampleFile), sample)
-    await button(stage(page), '导出 MP4').click()
-    const fallback = page.getByRole('dialog', { name: '确认导出替代画面' })
+    await button(stage(page), '成片检查').click()
+    const fallback = page.getByRole('dialog', { name: '成片检查', exact: true })
     await fallback.waitFor()
-    assert.equal(await fallback.getByText('静态参考图', { exact: true }).count(), 4)
-    await button(fallback, '返回补素材').click()
+    await fallback.getByText('静图回退', { exact: true }).first().waitFor()
+    assert.equal(await fallback.getByText('静图回退', { exact: true }).count(), 4)
+    await screenshot(page, 'feature-preflight-light.png')
+    await button(fallback, '关闭').click()
+    await button(page, '切换深色').click()
+    await button(stage(page), '成片检查').click()
+    await fallback.getByText('静图回退', { exact: true }).first().waitFor()
+    await screenshot(page, 'feature-preflight-dark.png')
+    const unavailable = sample.episodes[0].shots[2].media.image.versions[0]
+    const unavailablePath = path.join(path.dirname(sampleFile), 'media', `${unavailable.id}.${unavailable.extension}`)
+    await rename(unavailablePath, unavailablePath + '.test-backup')
+    try {
+      await button(fallback, '继续导出').click()
+      await fallback.getByRole('region', { name: '阻断', exact: true }).waitFor()
+      assert.equal(await button(fallback, '继续导出').count(), 0)
+      await fallback.getByRole('button', { name: /镜头 03.*参考图 · 素材文件不存在/ }).click()
+      await page.waitForFunction(() => document.activeElement?.id === 'shot-import-image')
+      await stage(page).getByText(/镜头 03 · /).waitFor()
+    } finally {
+      await rename(unavailablePath + '.test-backup', unavailablePath)
+    }
+    await button(page, '切换浅色').click()
+    await page.getByRole('button', { name: /^镜头 01 / }).click()
+    await page.locator('.monitor-body img').evaluate(image => image.decode())
     assert.deepEqual(await documentAt(sampleFile), sample)
     await page.getByLabel('静图运动', { exact: true }).selectOption('zoom-in')
     await button(page, '保存镜头').click()
@@ -1091,16 +1117,13 @@ async function main() {
     await mixed.waitFor({ timeout: 45_000 })
     await page.waitForFunction(() => document.querySelector('.episode-player')?.readyState >= 2)
     assert.ok(Math.abs(await mixed.evaluate(video => video.duration) - 30) < 0.05)
-    const sampleMixedFrame = time => mixed.evaluate(async (video, time) => {
-      video.pause()
-      await new Promise(resolve => { video.addEventListener('seeked', resolve, { once: true }); video.currentTime = time })
-      const canvas = document.createElement('canvas')
-      canvas.width = 32
-      canvas.height = 18
-      const context = canvas.getContext('2d')
-      context.drawImage(video, 0, 0, canvas.width, canvas.height)
-      return Array.from(context.getImageData(0, 0, canvas.width, 12).data)
-    }, time)
+    const sampleMixedFrame = async time => {
+      await mixed.evaluate(async (video, time) => {
+        video.pause()
+        await new Promise(resolve => { video.addEventListener('seeked', resolve, { once: true }); video.currentTime = time })
+      }, time)
+      return mixed.screenshot({ animations: 'disabled' })
+    }
     assert.notDeepEqual(await sampleMixedFrame(0.3), await sampleMixedFrame(6.8))
     await screenshot(page, 'feature-motion-mixed-preview.png')
     await button(page, '关闭预览').click()
@@ -1363,14 +1386,24 @@ async function main() {
 
     const last = saved.episodes[0].shots.at(-1).media.video.versions[0]
     const missing = path.join(project, 'media', `${last.id}.${last.extension}`)
-    await rename(missing, `${missing}.test-backup`)
+    await choose(app, destination, 'saveChoices')
+    await app.evaluate(({ dialog }, media) => {
+      const original = dialog.showSaveDialog
+      dialog.showSaveDialog = async (...args) => {
+        dialog.showSaveDialog = original
+        const selected = await original(...args)
+        await process.getBuiltinModule('node:fs/promises').rename(media, media + '.test-backup')
+        return selected
+      }
+    }, missing)
     try {
-      await choose(app, destination, 'saveChoices')
       await button(stage(page), '导出 MP4').click()
-      await page.getByRole('alert').filter({ hasText: '镜头 4 · 素材文件不存在' }).waitFor({ timeout: 45_000 })
+      const blocked = page.getByRole('dialog', { name: '成片检查', exact: true })
+      await blocked.getByRole('button', { name: /镜头 04.*视频 · 素材文件不存在/ }).waitFor()
       assert.equal(await hash(destination), sha)
+      await button(blocked, '关闭').click()
     } finally {
-      await rename(`${missing}.test-backup`, missing)
+      await rename(`${missing}.test-backup`, missing).catch(error => { if (error.code !== 'ENOENT') throw error })
     }
     assert.deepEqual((await documentAt(projectFile)).episodes[0].exportRecord, published)
     await guideStatus(page, 'export', '已完成')
@@ -1417,7 +1450,7 @@ async function main() {
     const silent = path.join(project, '静默 成片.mp4')
     await choose(app, silent, 'saveChoices')
     await button(guide(page), '导出 MP4').click()
-    await page.getByRole('dialog', { name: '确认导出替代画面' }).getByText('黑底', { exact: true }).waitFor()
+    await page.getByRole('dialog', { name: '成片检查', exact: true }).getByText('黑底', { exact: true }).waitFor()
     await button(page, '继续导出').click()
     await page.getByText(/导出完成/).waitFor({ timeout: 45_000 })
     await guideStatus(page, 'export', '已完成')

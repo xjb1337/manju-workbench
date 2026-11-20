@@ -30,6 +30,7 @@ export function ShotStage({
   onPreview,
   onRebuildPreview,
   onExport,
+  onCheck,
   onExportSrt,
   onAddPrimary,
   hasScript,
@@ -58,6 +59,7 @@ export function ShotStage({
   onPreview: () => void
   onRebuildPreview: () => void
   onExport: () => void
+  onCheck: () => void
   onExportSrt: () => void
   onAddPrimary: () => void
   hasScript: boolean
@@ -108,6 +110,7 @@ export function ShotStage({
         <button disabled={!canRender} onClick={onPreview}><Play size={16} weight="fill" /> 顺序预览</button>
         {shot && <button className="subtle" disabled={!canRender} onClick={onRebuildPreview}>重新生成预览</button>}
         {shot && <button disabled={!canRender || !episode?.shots.some(item => item.dialogue.trim())} onClick={onExportSrt}>导出 SRT</button>}
+        <button disabled={!canRender} onClick={onCheck}>成片检查</button>
         <button className="primary" disabled={!canRender} onClick={onExport}><DownloadSimple size={18} /> 导出 MP4</button>
       </div>}
     </div>

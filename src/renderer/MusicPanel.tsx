@@ -42,7 +42,7 @@ export function MusicPanel({ music, busy, canPreview, error, onClose, onImport, 
       <div className="dialog-actions music-actions">
         <button type="button" disabled={busy} onClick={onClose}>关闭</button>
         {music && <button type="button" className="subtle" disabled={busy} onClick={onRemove}>移除音乐</button>}
-        <button type="button" className={music ? '' : 'primary'} disabled={busy || changed} onClick={onImport}>
+        <button type="button" id="music-import" className={music ? '' : 'primary'} disabled={busy || changed} onClick={onImport}>
           {music ? '替换音乐' : '导入背景音乐'}
         </button>
         {music && <button type="button" disabled={busy || !canPreview || changed || !music.enabled || music.volume === 0}

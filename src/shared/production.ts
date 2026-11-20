@@ -77,18 +77,6 @@ export function productionProgress(project: Project, episodeId?: string) {
   return { steps, statuses, recommended, missingReferences, media, dialogueCount: shots.filter(shot => shot.dialogue.trim()).length }
 }
 
-export function exportFallbacks(project: Pick<Project, 'workType'>, episode: Episode) {
-  return episode.shots.flatMap((shot, index) => {
-    const method = shotMethod(project, shot)
-    const visual = shotVisual(shot, method)
-    if (!visual) return [{ index, title: shot.title, label: '黑底' }]
-    if (visual.kind === 'image' && usesTrack(method, 'video') && !shot.omittedMedia?.video) {
-      return [{ index, title: shot.title, label: '静态参考图' }]
-    }
-    return []
-  })
-}
-
 export function exportInputsChanged(before: Episode, after: Episode, beforeProject: Pick<Project, 'workType'> = {}, afterProject = beforeProject) {
   function inputs(shot: Shot, project: Pick<Project, 'workType'>) {
     const method = shotMethod(project, shot)

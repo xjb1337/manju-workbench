@@ -222,3 +222,74 @@ test('格式 1 升级副本不写入旧镜头运动，字段缺失时保持关�
   }
   assert.deepEqual(await readFile(path.join(root, '格式 1.mp4')), await readFile(path.join(root, '格式 2.mp4')))
 })
+
+test('成片检查读取实际渲染输入，区分回退、静默、过密、过期与阻断，并复核确认', async context => {
+  const { store, root, episodeId } = await fixture(context, [30, 1, 60, 30, 30, 30])
+  const { inspectEpisode, preflightAllows } = require('../dist/main/preflight')
+  const shots = store.snapshot.episodes[0].shots
+  const target = (index, kind) => ({ scope: 'shot', episodeId, shotId: shots[index].id, kind })
+  const edit = (index, fields) => store.edit({
+    type: 'shot.edit', episodeId, shotId: shots[index].id, fields: { ...shots[index], ...fields },
+  })
+  const omit = (index, kind) => store.edit({
+    type: 'shot.omit-media', episodeId, shotId: shots[index].id, kind, omitted: true,
+  })
+  const sample = path.resolve('resources/sample/01.jpg')
+  await store.importMedia(target(0, 'image'), sample)
+  await store.importMedia(target(1, 'image'), sample)
+  await store.importMedia(target(2, 'image'), sample)
+  await store.importMedia(target(1, 'audio'), tone(root, 550, 0.3))
+  const finished = path.join(root, '虚构带原声.mp4')
+  ffmpeg('-f', 'lavfi', '-i', 'color=orange:s=320x180:r=30:d=0.6',
+    '-f', 'lavfi', '-i', 'sine=duration=0.6:sample_rate=48000', '-c:v', 'libx264', '-threads', '2', '-c:a', 'aac', finished)
+  await edit(0, { dialogue: '需要配音' })
+  await edit(1, { dialogue: '字幕太密', method: 'image' })
+  await edit(2, { dialogue: '有视频原声', method: 'imported' })
+  await store.importMedia(target(2, 'video'), finished)
+  await edit(3, { dialogue: '有意静音' })
+  await omit(1, 'audio')
+  for (const kind of ['video', 'image', 'audio']) await omit(3, kind)
+  await edit(5, { dialogue: '虚构一行\n'.repeat(10), frames: 1 })
+  const projectFile = path.join(store.root, 'project.json')
+  const document = store.snapshot
+  const original = document.episodes[0].shots
+  original[0].media.image.versions[0].needsUpdate = true
+  delete original[2].media.video.versions[0].hasAudio
+  await writeFile(projectFile, JSON.stringify(document))
+  await rm(await store.assetPath(original[1].media.audio.versions[0]))
+  await rm(await store.assetPath(original[2].media.image.versions[0]))
+  let opened = await ProjectStore.open(store.root)
+  const check = () => {
+    const project = opened.snapshot
+    return inspectEpisode(opened, project, project.episodes[0], new AbortController().signal)
+  }
+  const initial = await check()
+  assert.deepEqual(initial.issues.map(issue => [issue.shot.index, issue.code, issue.target, issue.severity]), [
+    [0, 'still', 'video', 'warning'], [0, 'stale', 'image', 'warning'], [0, 'no-voice', 'audio', 'warning'],
+    [1, 'dense', 'dialogue', 'warning'],
+    [3, 'black', 'video', 'warning'], [4, 'missing-visual', 'video', 'warning'],
+    [5, 'missing-visual', 'video', 'warning'], [5, 'no-voice', 'audio', 'warning'], [5, 'subtitle-overflow', 'dialogue', 'error'],
+  ])
+  assert.equal(preflightAllows(initial, initial.review), false)
+  document.episodes[0].shots.pop()
+  await writeFile(projectFile, JSON.stringify(document))
+  await assert.rejects(check(), ProjectConflictError)
+  opened = await ProjectStore.open(store.root)
+  const warning = await check()
+  assert.equal(preflightAllows(warning), false)
+  assert.equal(preflightAllows(warning, warning.review), true)
+  const visible = await opened.assetPath(original[0].media.image.versions[0])
+  await rename(visible, visible + '.removed')
+  const missing = await check()
+  assert.equal(preflightAllows(missing, warning.review), false)
+  assert.ok(missing.issues.some(issue => issue.code === 'missing-file' && issue.shot.id === shots[0].id))
+  await writeFile(visible, '虚构坏图')
+  assert.ok((await check()).issues.some(issue => issue.code === 'unreadable' && issue.target === 'image'))
+  await rm(visible)
+  await rename(visible + '.removed', visible)
+  const music = (await opened.importMedia({ scope: 'music', episodeId }, tone(root, 240, 0.5))).episodes[0].music
+  await rm(await opened.assetPath(music.version))
+  assert.ok((await check()).issues.some(issue => issue.code === 'missing-file' && issue.target === 'music' && issue.severity === 'error'))
+  await opened.edit({ type: 'music.edit', episodeId, settings: { ...music, enabled: false } })
+  assert.equal((await check()).issues.some(issue => issue.target === 'music'), false)
+})

@@ -73,7 +73,7 @@ export function Inspector({
             {statuses.map(str => <option key={str}>{str}</option>)}</select></label>
         </div>
         {usesTrack(draft.method, 'image') && <label className="field">静图运动
-          <select value={draft.motion} onChange={event => setDraft({ ...draft, motion: event.target.value as ShotMotion })}>
+          <select aria-label="静图运动" value={draft.motion} onChange={event => setDraft({ ...draft, motion: event.target.value as ShotMotion })}>
             {motionSchema.options.map(option => <option key={option} value={option}>{motionLabels[option]}</option>)}
           </select>
         </label>}
@@ -113,6 +113,7 @@ export function Inspector({
       {kinds.map(kind => {
         const target = { scope: 'shot', episodeId: episode.id, shotId: shot.id, kind } as const
         return <MediaRow key={kind} track={shot.media[kind]} kind={kind} opened={opened} busy={busy}
+          importId={`shot-import-${kind}`} keepId={`shot-keep-${kind}`}
           onImport={() => onImport(target)} onActivate={id => onActivate(target, id)} onKeep={id => onKeep(target, id)}
           onRemove={id => onRemoveMedia(target, id)} onDropFile={file => onDropFile(target, file)} />
       })}

@@ -3,7 +3,7 @@ import { copyFile, link, lstat, mkdtemp, open, readFile, realpath, rename, rm, w
 import { availableParallelism, tmpdir } from 'node:os'
 import path from 'node:path'
 import { audibleMusic, shotMedia, shotVisual, folderNameSchema, totalFrames, visualMotion, type Episode, type Shot, type ShotMotion } from '../shared/model'
-import { frameSpec, shotMethod, usesFinishedVideo, type FrameSpec, type ShotMethod } from '../shared/creative'
+import { frameSpec, shotMethod, usesFinishedVideo, type FrameSpec } from '../shared/creative'
 import type { Project } from '../shared/model'
 import { mediaInput, probe, runTool } from './process'
 import { checkedFile, fileFingerprint, type ProjectStore } from './storage'
@@ -194,33 +194,29 @@ async function renameWithRetry(from: string, to: string) {
   }
 }
 
-type ShotInputs = {
-  method: ShotMethod
-  visual: ReturnType<typeof shotVisual>
-  voice: ReturnType<typeof shotMedia>
+export function shotSources(project: Project, shot: Shot) {
+  const method = shotMethod(project, shot)
+  const visual = shotVisual(shot, method)
+  const voice = shotMedia(shot, 'audio', method)
+  const checkVideoAudio = !voice && !shot.omittedMedia?.audio && visual?.kind === 'video' && usesFinishedVideo(method)
+  return { method, visual, voice, checkVideoAudio }
+}
+
+type ShotInputs = ReturnType<typeof shotSources> & {
   embeddedAudio: boolean
   visualPath?: string
   voicePath?: string
 }
 
-/** Resolves shot media tracks, validates source files on disk, and probes legacy video audio once. */
+/** Resolves the rendered tracks, including the actual audio stream of a finished video. */
 async function resolveShotInputs(store: ProjectStore, project: Project, shot: Shot, signal: AbortSignal): Promise<ShotInputs> {
-  const method = shotMethod(project, shot)
-  const visual = shotVisual(shot, method)
-  const video = visual?.kind === 'video' ? visual.version : undefined
-  const voice = shotMedia(shot, 'audio', method)
+  const sources = shotSources(project, shot)
+  const { visual, voice, checkVideoAudio } = sources
   const visualPath = visual && await store.assetPath(visual.version)
   const voicePath = voice && await store.assetPath(voice)
-  let embeddedAudio = false
-  // Probe earlier manifests that predate the embedded-audio marker.
-  if (!voice && !shot.omittedMedia?.audio && video && usesFinishedVideo(method)) {
-    if (video.hasAudio !== undefined) {
-      embeddedAudio = video.hasAudio
-    } else {
-      embeddedAudio = (await probe(visualPath!, video.extension, signal)).streams.some(stream => stream.codec_type === 'audio')
-    }
-  }
-  return { method, visual, voice, embeddedAudio, visualPath, voicePath }
+  const embeddedAudio = !!(checkVideoAudio && visual && visualPath
+    && (await probe(visualPath, visual.version.extension, signal)).streams.some(stream => stream.codec_type === 'audio'))
+  return { ...sources, embeddedAudio, visualPath, voicePath }
 }
 
 /** Computes a deterministic SHA-256 key covering all inputs that affect a shot's rendered output. */
@@ -432,7 +428,10 @@ export async function renderEpisode(
   store: ProjectStore,
   episode: Episode,
   destination: string,
-  options: { signal: AbortSignal; progress?: (percent: number) => void; publish?: () => void; project?: Project; cacheDir?: string },
+  options: {
+    signal: AbortSignal; progress?: (percent: number) => void; beforePublish?: () => Promise<void>
+    publish?: () => void; project?: Project; cacheDir?: string
+  },
 ) {
   const project = options.project ?? store.snapshot
   const spec = frameSpec(project)
@@ -544,6 +543,7 @@ export async function renderEpisode(
     if (musicPath && await fileFingerprint(musicPath, options.signal) !== musicHash) throw new Error('渲染期间背景音乐文件已变化')
     const handle = await open(complete, 'r+')
     try { await handle.sync() } finally { await handle.close() }
+    await options.beforePublish?.()
     options.signal.throwIfAborted()
     options.publish?.()
     await renameWithRetry(complete, destination)

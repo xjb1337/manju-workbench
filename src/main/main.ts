@@ -13,6 +13,7 @@ import { magpiePlanningPrompt, scriptAiPrompt, shotDetailAiPrompt } from '../sha
 import { generateAiTextDraft, generateMagpiePlan, testAiGateway } from './magpie'
 import { describeAiGateway } from './ai-gateway'
 import { mediaResponse } from './media-protocol'
+import { inspectEpisode, preflightAllows } from './preflight'
 import { exportDestination, renderEpisode, writeEpisodeSrt } from './render'
 import { fillSample, fillVerticalSample } from './sample'
 import { RecentProjects, themeSchema, type WindowBounds } from './recent-projects'
@@ -319,12 +320,29 @@ function wire() {
     return target
   }))
   handle('episode:cancel', () => workbench.cancelRender())
-  handle('episode:render', (win, key, id, value, rebuildInput) => workbench.serial(async (): Promise<RenderResult> => {
+  handle('episode:preflight', (_win, key, id) => workbench.serial(async () => {
+    const store = workbench.getStore(key)
+    const project = store.snapshot
+    const episode = findEpisode(project, idSchema.parse(id))
+    const state = { controller: new AbortController(), publishing: false }
+    workbench.job = state
+    try {
+      return await inspectEpisode(store, project, episode, state.controller.signal)
+    } catch (error) {
+      if (state.controller.signal.aborted) return null
+      throw error
+    } finally {
+      workbench.job = null
+    }
+  }))
+  handle('episode:render', (win, key, id, value, rebuildInput, reviewInput) => workbench.serial(async (): Promise<RenderResult> => {
     const mode = z.enum(['preview', 'export']).parse(value)
     const rebuild = z.boolean().default(false).parse(rebuildInput)
-    const store = mode === 'export' ? await writableProject(win, key) : workbench.getStore(key)
-    const projectSnapshot = store.snapshot
-    const episode = findEpisode(projectSnapshot, idSchema.parse(id))
+    const review = z.string().regex(/^[a-f0-9]{64}$/).optional().parse(reviewInput)
+    const episodeId = idSchema.parse(id)
+    let store = workbench.getStore(key)
+    let projectSnapshot = store.snapshot
+    let episode = findEpisode(projectSnapshot, episodeId)
     const state = { controller: new AbortController(), publishing: false }
     workbench.job = state
     const signal = state.controller.signal
@@ -335,11 +353,18 @@ function wire() {
         previewDir = await mkdtemp(path.join(tmpdir(), 'manju-preview-'))
         target = path.join(previewDir, 'preview.mp4')
       } else {
+        const initial = await inspectEpisode(store, projectSnapshot, episode, signal)
+        if (!preflightAllows(initial, review)) return { status: 'preflight', report: initial }
+        store = await writableProject(win, key)
+        projectSnapshot = store.snapshot
+        episode = findEpisode(projectSnapshot, episodeId)
         const label = exportLabel(episode.title)
         const selected = await dialog.showSaveDialog(win, { title: '导出 MP4', defaultPath: path.join(store.root, `成片 - ${label}.mp4`),
           filters: [{ name: 'MP4', extensions: ['mp4'] }] })
         if (selected.canceled || !selected.filePath) return { status: 'canceled' } as const
         signal.throwIfAborted()
+        const confirmed = await inspectEpisode(store, projectSnapshot, episode, signal)
+        if (!preflightAllows(confirmed, review)) return { status: 'preflight', report: confirmed }
         target = await exportDestination(selected.filePath, store.root)
       }
       const progress = (percent: number) => {
@@ -351,7 +376,9 @@ function wire() {
       if (mode === 'preview' && rebuild) await workbench.dropShotCache()
       const cacheDir = await workbench.ensureShotCache()
       const { musicHash } = await renderEpisode(store, episode, target, {
-        signal, progress, project: projectSnapshot, cacheDir, publish: () => { state.publishing = true },
+        signal, progress, project: projectSnapshot, cacheDir,
+        beforePublish: mode === 'export' ? () => store.assertDiskCurrent() : undefined,
+        publish: () => { state.publishing = true },
       })
       if (!previewDir) {
         try {
