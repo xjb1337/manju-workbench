@@ -5,9 +5,11 @@ import {
   detailKinds, detailLabels, methodLabels, methodSchema, usesFinishedVideo, usesTrack, type DetailKind, type ShotMethod,
 } from '../shared/creative'
 import {
-  kinds, shotMedia, statuses, type Episode, type MediaTarget, type Shot, type ShotFields,
+  kinds, motionSchema, shotMedia, statuses, type Episode, type MediaTarget, type Shot, type ShotFields, type ShotMotion,
 } from '../shared/model'
 import { Badge, MediaRow, sequence } from './components'
+
+const motionLabels: Record<ShotMotion, string> = { off: '关闭', 'zoom-in': '缓慢推近', 'zoom-out': '拉远', pan: '平移' }
 
 export function fieldsFor(shot: Shot, method: ShotMethod) {
   return {
@@ -18,6 +20,7 @@ export function fieldsFor(shot: Shot, method: ShotMethod) {
     videoPrompt: shot.videoPrompt ?? '',
     status: shot.status,
     method,
+    motion: shot.motion ?? 'off' as const,
   }
 }
 
@@ -35,16 +38,17 @@ export function Inspector({
   onRemove: () => void; onDirty: (value: boolean) => void
 }) {
   const [draft, setDraft] = useState(() => fieldsFor(shot, method))
-  const { title, frames, dialogue, prompt, videoPrompt = '', status } = shot
+  const { title, frames, dialogue, prompt, videoPrompt = '', status, motion = 'off' } = shot
   useEffect(() => {
-    setDraft({ title, seconds: String(Number((frames / 30).toFixed(3))), dialogue, prompt, videoPrompt, status, method })
-  }, [title, frames, dialogue, prompt, videoPrompt, status, method])
+    setDraft({ title, seconds: String(Number((frames / 30).toFixed(3))), dialogue, prompt, videoPrompt, status, method, motion })
+  }, [title, frames, dialogue, prompt, videoPrompt, status, method, motion])
   const finished = shotMedia(shot, 'video', method)
   const finishedFrames = finished?.seconds && Math.round(finished.seconds * 30)
   const canUseFinishedDuration = usesFinishedVideo(method) && !!finishedFrames && finishedFrames <= 18_000
     && Math.round(Number(draft.seconds) * 30) !== finishedFrames
   const dirty = draft.title.trim() !== title || Math.round(Number(draft.seconds) * 30) !== frames
-    || draft.dialogue !== dialogue || draft.prompt !== prompt || draft.videoPrompt !== videoPrompt || draft.status !== status || draft.method !== method
+    || draft.dialogue !== dialogue || draft.prompt !== prompt || draft.videoPrompt !== videoPrompt || draft.status !== status
+    || draft.method !== method || draft.motion !== motion
   useEffect(() => { onDirty(dirty); return () => onDirty(false) }, [dirty, onDirty])
   const promptToCopy = detailedImagePrompt ?? draft.prompt
   return <aside className="inspector" aria-label="镜头编辑">
@@ -54,6 +58,7 @@ export function Inspector({
       onSave({ title: draft.title.trim(), frames: Math.round(Number(draft.seconds) * 30),
         dialogue: draft.dialogue, prompt: draft.prompt, status: draft.status,
         ...(draft.method !== method && { method: draft.method }),
+        ...(draft.motion !== motion && { motion: draft.motion }),
         ...(draft.videoPrompt !== videoPrompt && { videoPrompt: draft.videoPrompt }) })
     }}>
       <fieldset disabled={busy}>
@@ -67,6 +72,11 @@ export function Inspector({
           <label className="field">状态<select aria-label="状态" value={draft.status} onChange={event => setDraft({ ...draft, status: event.target.value as ShotFields['status'] })}>
             {statuses.map(str => <option key={str}>{str}</option>)}</select></label>
         </div>
+        {usesTrack(draft.method, 'image') && <label className="field">静图运动
+          <select value={draft.motion} onChange={event => setDraft({ ...draft, motion: event.target.value as ShotMotion })}>
+            {motionSchema.options.map(option => <option key={option} value={option}>{motionLabels[option]}</option>)}
+          </select>
+        </label>}
         {canUseFinishedDuration && <button type="button" className="small subtle accent use-clip-duration"
           onClick={() => setDraft({ ...draft, seconds: String(Number((finishedFrames / 30).toFixed(3))) })}>使用成片时长</button>}
         <div className="field">

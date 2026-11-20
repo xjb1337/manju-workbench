@@ -259,6 +259,7 @@ function mutate(project: Project, change: Mutation) {
         prompt: source.prompt,
         ...(source.videoPrompt !== undefined && { videoPrompt: source.videoPrompt }),
         ...(source.method !== undefined && { method: source.method }),
+        ...(source.motion !== undefined && { motion: source.motion }),
         status: '待制作',
         media: { image: emptyTrack(), video: emptyTrack(), audio: emptyTrack() },
         ...(source.omittedMedia && { omittedMedia: { ...source.omittedMedia } }),

@@ -38,6 +38,8 @@ const trackSchema = z.object({
 export type Track = z.infer<typeof trackSchema>
 
 export const shotDialogueSchema = z.string().max(1000, '台词最多 1,000 个字符')
+export const motionSchema = z.enum(['off', 'zoom-in', 'zoom-out', 'pan'])
+export type ShotMotion = z.infer<typeof motionSchema>
 export const shotFields = z.object({
   title: titleSchema,
   // Whole 1/30-second frames keep timeline, picture and audio boundaries aligned.
@@ -46,6 +48,7 @@ export const shotFields = z.object({
   prompt: notes,
   videoPrompt: notes.optional(),
   method: methodSchema.optional(),
+  motion: motionSchema.optional(),
   status: z.enum(statuses),
 })
 export type ShotFields = z.infer<typeof shotFields>
@@ -185,6 +188,10 @@ export function shotVisual(shot: Shot, method: ShotMethod) {
   if (video) return { kind: 'video', version: video } as const
   const image = shotMedia(shot, 'image', method)
   if (image) return { kind: 'image', version: image } as const
+}
+
+export function visualMotion(shot: Pick<Shot, 'motion'>, visualKind: MediaKind | undefined): ShotMotion {
+  return visualKind === 'image' ? shot.motion ?? 'off' : 'off'
 }
 
 export function audibleMusic(episode: Episode) {

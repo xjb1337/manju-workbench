@@ -135,3 +135,90 @@ test('背景音乐随作品迁移，纳入素材索引、项目锁和清理凭�
   assert.equal(loaded.findVersion(music.version.id), undefined)
   assert.deepEqual(await readdir(path.join(moved, 'media')), [])
 })
+
+function sampledLuma(file) {
+  const raw = ffmpeg('-i', file, '-an', '-vf', "select='eq(n,0)+eq(n,14)+eq(n,29)',scale=48:48,format=gray",
+    '-fps_mode', 'passthrough', '-f', 'rawvideo', '-')
+  const area = 48 * 48
+  assert.equal(raw.length, area * 3)
+  return [0, 1, 2].map(index => raw.subarray(index * area, (index + 1) * area))
+}
+
+for (const [ratio, width, height] of [['16:9', 1280, 720], ['9:16', 720, 1280]]) {
+  test(`静图运动 ${ratio} 覆盖画幅并平稳移动，切换模式重编缓存`, async context => {
+    const { store, root, episodeId } = await fixture(context, [30])
+    if (ratio === '9:16') await store.edit({ type: 'project.brief', workType: 'story', brief: { ratio } })
+    const shot = store.snapshot.episodes[0].shots[0]
+    const image = path.join(root, '虚构灰阶图.png')
+    ffmpeg('-f', 'lavfi', '-i', "nullsrc=s=320x320,geq=lum='60+110*X/W+35*Y/H':cb=128:cr=128",
+      '-frames:v', '1', '-threads', '1', image)
+    await store.importMedia({ scope: 'shot', episodeId, shotId: shot.id, kind: 'image' }, image)
+    const cacheDir = await mkdtemp(path.join(root, 'cache-'))
+    const destination = path.join(root, '运动.mp4')
+    const episode = () => store.snapshot.episodes[0]
+    const render = () => renderEpisode(store, episode(), destination, { signal: new AbortController().signal, cacheDir })
+    assert.equal(episode().shots[0].motion, undefined)
+    await render()
+    const unchanged = await readFile(destination)
+    const staticFrames = sampledLuma(destination)
+    assert.ok(staticFrames.every(frame => frame[0] < 12), '默认仍使用原有静图适配')
+
+    const editMotion = motion => {
+      const shot = episode().shots[0]
+      return store.edit({ type: 'shot.edit', episodeId, shotId: shot.id, fields: { ...shot, motion } })
+    }
+    await editMotion('off')
+    await render()
+    assert.deepEqual(await readFile(destination), unchanged)
+    assert.equal((await readdir(cacheDir)).length, 1)
+    await store.recordExport(episode())
+
+    for (const [index, motion] of ['zoom-in', 'zoom-out', 'pan'].entries()) {
+      await editMotion(motion)
+      assert.equal(episode().exportRecord.stale, true)
+      await render()
+      assert.equal((await readdir(cacheDir)).length, index + 2)
+      const [stream] = streamInfo(destination)
+      assert.deepEqual([stream.width, stream.height, stream.nb_frames], [width, height, '30'])
+      const frames = sampledLuma(destination)
+      assert.ok(frames.every(frame => [0, 47, 48 * 47, 48 * 48 - 1].every(corner => frame[corner] > 35)), '运动期间全画幅无黑边')
+      const samples = frames.map(frame => frame[4 * 48 + 4])
+      const [start, middle, end] = motion === 'zoom-out' ? samples.toReversed() : samples
+      assert.ok(start < middle && middle < end && end - start >= 5, `${motion} 亮度位移 ${samples}`)
+    }
+
+    await render()
+    assert.equal((await readdir(cacheDir)).length, 4, '相同运动复用镜头缓存')
+    if (ratio === '16:9') {
+      const video = path.join(root, '虚构固定视频.mp4')
+      ffmpeg('-f', 'lavfi', '-i', 'color=orange:s=320x180:r=30:d=1', '-c:v', 'libx264', '-threads', '2', video)
+      await store.importMedia({ scope: 'shot', episodeId, shotId: shot.id, kind: 'video' }, video)
+      await render()
+      const original = await readFile(destination)
+      await store.recordExport(episode())
+      await editMotion('zoom-out')
+      await render()
+      assert.equal(episode().exportRecord.stale, false)
+      assert.equal((await readdir(cacheDir)).length, 5)
+      assert.deepEqual(await readFile(destination), original)
+    }
+  })
+}
+
+test('格式 1 升级副本不写入旧镜头运动，字段缺失时保持关闭', async context => {
+  const { store, root } = await fixture(context, [1])
+  const project = store.snapshot
+  const file = path.join(store.root, 'project.json')
+  await writeFile(file, JSON.stringify({ ...project, schemaVersion: 1 }))
+  const legacy = await ProjectStore.open(store.root)
+  const upgraded = await legacy.upgradeCopy(async () => true)
+  assert.equal(upgraded.snapshot.schemaVersion, 2)
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).schemaVersion, 1)
+  for (const version of [legacy, upgraded]) {
+    const episode = version.snapshot.episodes[0]
+    assert.equal(episode.shots[0].motion, undefined)
+    await renderEpisode(version, episode, path.join(root, `格式 ${version.snapshot.schemaVersion}.mp4`),
+      { signal: new AbortController().signal })
+  }
+  assert.deepEqual(await readFile(path.join(root, '格式 1.mp4')), await readFile(path.join(root, '格式 2.mp4')))
+})

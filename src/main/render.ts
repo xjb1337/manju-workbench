@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { copyFile, link, lstat, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { availableParallelism, tmpdir } from 'node:os'
 import path from 'node:path'
-import { audibleMusic, shotMedia, shotVisual, folderNameSchema, totalFrames, type Episode, type Shot } from '../shared/model'
+import { audibleMusic, shotMedia, shotVisual, folderNameSchema, totalFrames, visualMotion, type Episode, type Shot, type ShotMotion } from '../shared/model'
 import { frameSpec, shotMethod, usesFinishedVideo, type FrameSpec, type ShotMethod } from '../shared/creative'
 import type { Project } from '../shared/model'
 import { mediaInput, probe, runTool } from './process'
@@ -228,6 +228,7 @@ async function shotCacheKey(spec: FrameSpec, shot: Shot, inputs: ShotInputs, duc
   const { method, visual, voice, embeddedAudio, visualPath, voicePath } = inputs
   const visualHash = visualPath && await fileFingerprint(visualPath, signal)
   const voiceHash = voicePath && await fileFingerprint(voicePath, signal)
+  const motion = visualMotion(shot, visual?.kind)
   return createHash('sha256').update(JSON.stringify({
     version: shotCacheVersion,
     spec: {
@@ -256,6 +257,7 @@ async function shotCacheKey(spec: FrameSpec, shot: Shot, inputs: ShotInputs, duc
     } : null,
     embeddedAudio,
     ...(duckTrack && { duckTrack }),
+    ...(motion !== 'off' && { motion }),
   })).digest('hex')
 }
 
@@ -298,6 +300,19 @@ async function writeShotCache(workFile: string, cacheDir: string, hash: string, 
   }
 }
 
+function motionFilters(motion: Exclude<ShotMotion, 'off'>, frames: number, width: number, height: number) {
+  const progress = `(1-cos(PI*on/${Math.max(1, frames - 1)}))/2`
+  const zoom = { 'zoom-in': `1+0.18*${progress}`, 'zoom-out': `1.18-0.18*${progress}`, pan: '1.18' }[motion]
+  const x = `(iw-iw/zoom)*${motion === 'pan' ? progress : '0.5'}`
+  return [
+    'trim=end_frame=1',
+    `crop=w='max(1,min(iw,ih*${width}/${height}/sar))':h='max(1,min(ih,iw*${height}/${width}*sar))':exact=1`,
+    // Oversampling the still and retaining full chroma let zoompan move in smaller steps.
+    `scale=${width * 3}:${height * 3}:flags=bicubic`, 'setsar=1', 'format=yuv444p',
+    `zoompan=z='${zoom}':x='${x}':y='(ih-ih/zoom)*0.5':d=${frames}:s=${width}x${height}:fps=${fps}`,
+  ]
+}
+
 async function encodeShot(
   store: ProjectStore,
   shot: Shot,
@@ -321,13 +336,17 @@ async function encodeShot(
   const captionFile = `caption-${index}.ass`
   const caption = !!shot.dialogue.trim()
   if (caption) await writeFile(path.join(cwd, captionFile), subtitles(shot, spec), 'utf8')
-  const videoFilter = [
-    'setpts=PTS-STARTPTS',
+  const motion = visualMotion(shot, visual?.kind)
+  const pictureFilters = motion === 'off' ? [
     `fps=${fps}:eof_action=pass`,
     `scale=w='max(2,trunc(min(${width},${height}*dar)/2)*2)':h='max(2,trunc(min(${height},${width}/dar)/2)*2)'`,
     'setsar=1',
     `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`,
     ...(visual ? ['tpad=stop_mode=clone:stop=-1'] : []),
+  ] : motionFilters(motion, shot.frames, width, height)
+  const videoFilter = [
+    'setpts=PTS-STARTPTS',
+    ...pictureFilters,
     `trim=end_frame=${shot.frames}`,
     ...(caption ? [`subtitles=${captionFile}`] : []),
   ].join(',')
