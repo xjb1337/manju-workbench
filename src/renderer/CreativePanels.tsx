@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { ArrowSquareOut, Copy, FileText, FloppyDisk, Sparkle } from '@phosphor-icons/react'
 import {
   defaultMethod, detailLabels, frameSpec, generationKindSchema, generationLabels, generationPresets, generationToolUrl,
@@ -7,10 +7,13 @@ import {
 } from '../shared/creative'
 import { shotDialogueSchema, type Episode, type Mutation, type Project, type Shot } from '../shared/model'
 import {
-  aiInstructionSchema, magpieModelSchema, magpieScriptSchema, maxPlanCharacters, type AiGatewayConfig, type PlanPreview,
+  aiInstructionSchema, magpieScriptSchema, maxPlanCharacters, type AiRequestTarget, type PlanPreview,
 } from '../shared/plan'
-import { briefFields, missingBrief, planningPrompt, shotPromptBody, shotPromptContext, shotPromptText, voiceDialoguePreview } from '../shared/prompts'
-import { aiGatewaySummary } from './AiPanels'
+import {
+  briefFields, magpiePlanningPrompt, missingBrief, planningPrompt, shotDetailAiPrompt, shotPromptBody,
+  shotPromptContext, shotPromptText, voiceDialoguePreview,
+} from '../shared/prompts'
+import { AiRequestFields, useAiRequest, type AiPanelOptions } from './AiPanels'
 import { Badge, Modal, sequence } from './components'
 
 type Failure = (message: string) => void
@@ -142,9 +145,9 @@ export function BriefPanel({ project, episode, busy, onDirty, onSave, onPlan, on
         </div>
         <div className="plan-buttons">
           {hasScript
-            ? <button type="button" className="primary" disabled={busy} onClick={() => void saveThenOpen(onMagpie)}><Sparkle size={16} /> AI 生成分镜草案</button>
+            ? <button type="button" className="primary" disabled={busy} onClick={onMagpie}><Sparkle size={16} /> AI 生成分镜草案</button>
             : <button type="button" className="primary" disabled={busy} onClick={onWriteScript}><FileText size={16} /> 写／粘贴剧本</button>}
-          {!hasScript && <button type="button" disabled={busy} onClick={() => void saveThenOpen(onMagpie)}>粘贴剧本</button>}
+          {!hasScript && <button type="button" disabled={busy} onClick={onMagpie}>粘贴剧本</button>}
           <button type="button" disabled={busy} onClick={() => void saveThenOpen(onPlan)}>总规划提示词</button>
           <button type="button" disabled={busy} onClick={() => void saveThenOpen(onImport)}>导入外部规划</button>
         </div>
@@ -183,41 +186,35 @@ export function PlanningDialog({ project, episode, busy, copy, openTool, close }
 
 type PlanSource =
   | { kind: 'paste'; preview: (text: string, accept: (preview: PlanPreview) => void, failure: Failure) => void }
-  | { kind: 'magpie'; script: string; preview: (model: string, script: string, accept: (preview: PlanPreview | null) => void, failure: Failure) => void;
+  | { kind: 'magpie'; script: string; preview: (target: AiRequestTarget, script: string, accept: (preview: PlanPreview | null) => void, failure: Failure) => void;
       cancel: (failure: Failure) => void }
 
 export function PlanImportDialog({
-  episode, fictional, busy, aiConfig, discoveredModels, source, onOpenAiSettings, onSaveModel, onMerge, close,
+  project, episode, busy, ai, source, onMerge, close,
 }: {
-  episode?: Episode; fictional: boolean; busy: boolean; aiConfig: AiGatewayConfig; discoveredModels: string[]
+  project: Project; episode?: Episode; busy: boolean; ai: AiPanelOptions
   close: () => void; source: PlanSource
-  onOpenAiSettings: () => void; onSaveModel: (model: string) => void
   onMerge: (preview: PlanPreview, replacements: string[], failure: Failure) => void
 }) {
   const [text, setText] = useState(source.kind === 'magpie' ? source.script : '')
-  const [model, setModel] = useState(aiConfig.model)
-  const [modelEdited, setModelEdited] = useState(false)
   const [preview, setPreview] = useState<PlanPreview>()
   const [replacements, setReplacements] = useState<string[]>([])
   const [error, setError] = useState('')
   const [stopped, setStopped] = useState(false)
+  const [generating, setGenerating] = useState(false)
   const back = useRef<HTMLButtonElement>(null)
-  const modelsListId = useId()
-  useEffect(() => { if (!modelEdited) setModel(aiConfig.model) }, [aiConfig.model, modelEdited])
   useEffect(() => { if (preview && !busy) back.current?.focus() }, [preview, busy])
   const magpie = source.kind === 'magpie' ? source : undefined
+  const request = useAiRequest(ai.config, !!magpie)
+  const validScript = magpie && magpieScriptSchema.safeParse(text)
   const title = magpie ? (preview ? 'AI 分镜草案预览' : 'AI 生成分镜草案') : (preview ? '规划导入预览' : '导入外部规划')
   const conflictIds = preview ? preview.changes.filter(change => change.conflict).map(change => change.id) : []
   const stop = () => magpie?.cancel(setError)
-  return <Modal title={title} onClose={busy && magpie && !preview ? stop : close}>
+  return <Modal title={title} onClose={generating ? stop : close}>
     <div className="creative-dialog">
       <div className="import-target">
         <span>{episode ? `目标集数 · ${episode.title}` : magpie ? '从草案创建集数' : '从规划创建集数'}</span>
-        {fictional && <Badge value="示例 / 虚构" />}
-        {magpie && !preview && <div className="ai-gateway-bar">
-          <Badge value={aiGatewaySummary(aiConfig)} />
-          <button type="button" className="small subtle" disabled={busy} onClick={onOpenAiSettings}>切换网关</button>
-        </div>}
+        {project.fictional && <Badge value="示例 / 虚构" />}
         {preview && !!conflictIds.length && <div className="plan-diff-actions">
           <button type="button" className="small subtle" disabled={busy || !replacements.length}
             onClick={() => setReplacements([])}>全部保留当前</button>
@@ -259,37 +256,31 @@ export function PlanImportDialog({
         setError('')
         setStopped(false)
         if (source.kind === 'paste') source.preview(text, setPreview, setError)
-        else {
-          const validModel = magpieModelSchema.safeParse(model)
-          const validScript = magpieScriptSchema.safeParse(text)
-          if (!validModel.success) { setError(validModel.error.issues[0].message); return }
+        else if (request.target && validScript) {
           if (!validScript.success) { setError(validScript.error.issues[0].message); return }
-          onSaveModel(validModel.data)
-          source.preview(validModel.data, validScript.data, draft => {
+          setGenerating(true)
+          source.preview(request.target, validScript.data, draft => {
+            setGenerating(false)
             if (draft) setPreview(draft)
             else setStopped(true)
-          }, setError)
+          }, message => {
+            setGenerating(false)
+            setError(message)
+          })
         }
       }}>
-        {magpie && <div className="magpie-settings">
-          <label className="field">{aiConfig.preset === 'magpie' ? 'Magpie 模型 ID' : '模型 ID'}
-            <input list={discoveredModels.length ? modelsListId : undefined} value={model} maxLength={200}
-              disabled={busy} spellCheck={false} autoCapitalize="none" autoCorrect="off"
-              onChange={event => { setModelEdited(true); setModel(event.target.value) }} />
-          </label>
-          {!!discoveredModels.length && <datalist id={modelsListId}>
-            {discoveredModels.map(item => <option key={item} value={item} />)}
-          </datalist>}
-        </div>}
         <label className="field">{magpie ? '剧本文本' : '规划 JSON'}<textarea className="long-prompt" autoFocus rows={magpie ? 9 : 12} value={text}
           readOnly={busy && !!magpie} maxLength={magpie ? 30_000 : maxPlanCharacters}
           onChange={event => setText(event.target.value)} /></label>
+        {magpie && <AiRequestFields ai={ai} request={request} disabled={busy}
+          scope="剧本文本 · 制作简报字段 · 本集分镜"
+          prompt={validScript?.success ? () => magpiePlanningPrompt(project, episode, validScript.data) : undefined} />}
         {error && <p className="inline-error" role="alert">{error}</p>}
         <div className="dialog-actions">
-          {magpie && <span className="dialog-status" role="status">{busy ? '正在等待 AI 返回草案…' : stopped ? '已停止等待' : ''}</span>}
-          {magpie && busy ? <button type="button" onClick={stop}>停止等待</button> :
+          {magpie && <span className="dialog-status" role="status">{generating ? '正在等待 AI 返回草案…' : stopped ? '已停止等待' : ''}</span>}
+          {generating ? <button type="button" onClick={stop}>停止等待</button> :
             <button type="button" disabled={busy} onClick={close}>取消</button>}
-          <button type="submit" className="primary" disabled={busy || !text.trim()}>
+          <button type="submit" className="primary" disabled={busy || !text.trim() || (!!magpie && !request.target)}>
             {magpie ? <><Sparkle size={16} /> 生成草案</> : '预览差异'}
           </button>
         </div>
@@ -299,11 +290,10 @@ export function PlanImportDialog({
 }
 
 export function DetailDialog({
-  project, episode, shot, kind, busy, aiConfig, onOpenAiSettings, onOptimize, onCancelOptimize, onDirty, copy, save, onApplyVoice, close,
+  project, episode, shot, kind, busy, ai, onOptimize, onCancelOptimize, onDirty, copy, save, onApplyVoice, close,
 }: {
-  project: Project; episode: Episode; shot: Shot; kind: DetailKind; busy: boolean; aiConfig: AiGatewayConfig
-  onOpenAiSettings: () => void
-  onOptimize: (body: string, instruction: string, accept: (draft: string | null) => void, failure: Failure) => void
+  project: Project; episode: Episode; shot: Shot; kind: DetailKind; busy: boolean; ai: AiPanelOptions
+  onOptimize: (target: AiRequestTarget, body: string, instruction: string, accept: (draft: string | null) => void, failure: Failure) => void
   onCancelOptimize: (failure: Failure) => void
   onDirty: (dirty: boolean) => void; copy: CopyText
   save: (action: DetailAction, failure: Failure) => Promise<boolean>; close: () => void
@@ -322,6 +312,8 @@ export function DetailDialog({
   const [confirm, setConfirm] = useState<'regenerate' | 'discard' | null>(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const request = useAiRequest(ai.config)
+  const parsedInstruction = aiInstructionSchema.safeParse(instruction)
   const changed = body !== baseline
   useEffect(() => { onDirty(changed); return () => onDirty(false) }, [changed, onDirty])
   useEffect(() => { setBody(baseline); setAiDraft(null) }, [baseline])
@@ -338,16 +330,15 @@ export function DetailDialog({
     else close()
   }
   function triggerOptimize() {
-    if (busy) return
-    const parsed = aiInstructionSchema.safeParse(instruction)
-    if (!parsed.success) {
-      setError(parsed.error.issues[0].message)
+    if (busy || !request.target) return
+    if (!parsedInstruction.success) {
+      setError(parsedInstruction.error.issues[0].message)
       return
     }
     setError('')
     setNotice('')
     setOptimizing(true)
-    onOptimize(body, parsed.data, draft => {
+    onOptimize(request.target, body, parsedInstruction.data, draft => {
       setOptimizing(false)
       if (draft !== null) setAiDraft(draft)
       else setNotice('已停止等待')
@@ -390,10 +381,6 @@ export function DetailDialog({
         <Badge value={stored?.needsUpdate ? '需更新' : stored?.source === 'manual' ? '手改' : stored?.source === 'external' ? '来自规划' : stored ? '已保存' : '未保存'} />
         {changed && <Badge value="有未保存修改" />}
         <span>{spec.ratio} · {spec.width} × {spec.height} · 30 fps</span>
-        <div className="ai-gateway-bar">
-          <Badge value={`${aiGatewaySummary(aiConfig)} · ${aiConfig.model}`} />
-          <button type="button" className="small subtle" disabled={busy} onClick={onOpenAiSettings}>切换网关</button>
-        </div>
       </div>
       <details className="prompt-settings"><summary>作品共享设定（复制时附上）</summary>
         <pre>{sharedContext}</pre>
@@ -413,6 +400,11 @@ export function DetailDialog({
           }}>应用到编辑器</button>
         </div>
       </> : <>
+        <label className="field">提示词正文<textarea className="long-prompt" value={body} rows={11} maxLength={30000} disabled={busy || !!confirm}
+          onChange={event => { setBody(event.target.value); setNotice('') }} /></label>
+        <AiRequestFields ai={ai} request={request} disabled={busy || !!confirm}
+          scope="提示词与优化要求 · 本镜及相邻镜头 · 作品设定"
+          prompt={parsedInstruction.success ? () => shotDetailAiPrompt(project, episode, shot, kind, body, parsedInstruction.data) : undefined} />
         <div className="ai-optimize-bar">
           <input value={instruction} maxLength={2000} disabled={busy || !!confirm}
             aria-label="AI 优化要求"
@@ -420,12 +412,10 @@ export function DetailDialog({
             onChange={event => setInstruction(event.target.value)} />
           {optimizing
             ? <button type="button" onClick={() => onCancelOptimize(setError)}>停止等待</button>
-            : <button type="button" disabled={busy || !!confirm} onClick={triggerOptimize}>
+            : <button type="button" disabled={busy || !!confirm || !request.target} onClick={triggerOptimize}>
                 <Sparkle size={15} /> AI 优化提示词
               </button>}
         </div>
-        <label className="field">提示词正文<textarea className="long-prompt" value={body} rows={11} maxLength={30000} disabled={busy || !!confirm}
-          onChange={event => { setBody(event.target.value); setNotice('') }} /></label>
         {error && <p className="inline-error" role="alert">{error}</p>}
         {confirm ? <div className="detail-confirm">
           <p className="risk">{confirm === 'regenerate' ? '重新生成会替换本条提示词正文。' : '关闭会放弃本条未保存的修改。'}</p>

@@ -10,7 +10,8 @@ export const sequence = (index: number) => String(index + 1).padStart(2, '0')
 export const mediaUrl = (opened: OpenProject, version: Version) => `manju-media://project/${opened.mediaKey}/${version.id}`
 
 export function Badge({ value }: { value: string }) {
-  const color = { 待制作: 'idle', 待审核: 'review', 已通过: 'approved', 需更新: 'review', 冲突: 'review', 已保存: 'approved', 来自规划: 'fiction', 未保存: 'idle' }[value] ?? 'fiction'
+  const color = { 待制作: 'idle', 待审核: 'review', 已通过: 'approved', 需更新: 'review', 冲突: 'review', 已保存: 'approved',
+    来自规划: 'fiction', 未保存: 'idle', '局域网明文 HTTP': 'review' }[value] ?? 'fiction'
   return <span className={`badge ${color}`}>{value}</span>
 }
 
@@ -211,19 +212,25 @@ export function NameModal({ title, initial = '', confirm, busy, error, onClose, 
   </Modal>
 }
 
-export function TextEditor({ title, name, script, field, busy, onSave, onRemove, onDirty, extraActions }: {
+export function TextEditor({ title, name, script, field, busy, onSave, onRemove, onDirty, onCopyDraft, extraActions }: {
   title: string; name: string; script: string; field: string; busy: boolean
-  onSave: (title: string, text: string) => void; onRemove?: () => void; onDirty: (value: boolean) => void
+  onSave: (title: string, text: string, onConflict: () => void) => void; onRemove?: () => void; onDirty: (value: boolean) => void
+  onCopyDraft?: (text: string) => void
   extraActions?: (draft: { name: string; script: string }, applyScript: (next: string) => void) => ReactNode
 }) {
   const [draft, setDraft] = useState({ name, script })
+  const [conflict, setConflict] = useState(false)
   useEffect(() => { setDraft({ name, script }) }, [name, script])
   const dirty = name !== draft.name || script !== draft.script
   useEffect(() => { onDirty(dirty); return () => onDirty(false) }, [dirty, onDirty])
-  return <form className="text-editor" onSubmit={event => { event.preventDefault(); onSave(draft.name, draft.script) }}>
+  return <form className="text-editor" onSubmit={event => {
+    event.preventDefault()
+    onSave(draft.name, draft.script, () => setConflict(true))
+  }}>
     <fieldset disabled={busy}>
       <div className="section-head"><h2>{title}</h2><div className="actions">
         {extraActions?.(draft, next => setDraft(current => ({ ...current, script: next })))}
+        {conflict && dirty && onCopyDraft && <button type="button" className="small" onClick={() => onCopyDraft(draft.script)}>复制草稿</button>}
         {onRemove && <button type="button" className="icon subtle danger" title="删除" aria-label="删除" onClick={onRemove}><Trash size={17} /></button>}
         <button type="submit" className="primary small" disabled={!dirty || !draft.name.trim()}><Check size={17} /> 保存</button>
       </div></div>

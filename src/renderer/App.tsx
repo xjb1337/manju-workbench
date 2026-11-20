@@ -1,12 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ArrowSquareOut, Broom, Check, FilmSlate, FolderOpen, Moon, Plus, SlidersHorizontal, Sparkle, Sun, WarningCircle, X } from '@phosphor-icons/react'
-import type { OpenProject, RecentProject, RenderProgress, Reply } from '../shared/api'
+import type { OpenProject, OrphanMediaPreview, RecentProject, RenderProgress, Reply, ReplyError } from '../shared/api'
 import { frameSpec, generationLabels, generationToolName, shotMethod, workTypeLabels, type DetailKind, type GenerationKind } from '../shared/creative'
 import { folderNameSchema, type MediaTarget, type Mutation, type Project, type Track } from '../shared/model'
 import { defaultAiGatewayConfig, type AiGatewayConfig } from '../shared/plan'
 import { exportFallbacks, productionProgress, type StepId } from '../shared/production'
 import { legacyDetail, savedShotPrompt } from '../shared/prompts'
-import { AiSettingsDialog, sameGateway, ScriptAiDialog, type GatewayProbe } from './AiPanels'
+import { AiSettingsDialog, sameGateway, ScriptAiDialog, type AiPanelOptions, type GatewayProbe } from './AiPanels'
 import { Badge, Modal, NameModal, PreviewPlayer, kindLabel, sequence } from './components'
 import { BriefPanel, DetailDialog, PlanImportDialog, PlanningDialog } from './CreativePanels'
 import { Inspector } from './Inspector'
@@ -21,7 +21,7 @@ type EditorField = 'shot-prompt' | 'shot-video-prompt' | 'shot-dialogue' | 'scri
 type Ask =
   | { kind: 'name'; title: string; initial?: string; confirm: string; action: (name: string) => Promise<boolean> }
   | { kind: 'remove'; title: string; name: string; change: Mutation }
-  | { kind: 'clean-orphans'; report: { count: number; bytes: number } }
+  | { kind: 'clean-orphans'; report: OrphanMediaPreview; stale?: boolean }
   | { kind: 'discard'; action: () => void }
   | { kind: 'export'; fallbacks: ReturnType<typeof exportFallbacks> }
 
@@ -69,6 +69,12 @@ export function App() {
   const discoveredModels = gatewayProbe && 'result' in gatewayProbe && sameGateway(aiConfig, gatewayProbe)
     ? gatewayProbe.result.models : []
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false)
+  const aiPanel: AiPanelOptions = {
+    config: aiConfig,
+    discoveredModels,
+    openSettings: () => setAiSettingsOpen(true),
+    setDefault: (model, failure) => void saveAiConfig({ ...aiConfig, model }, failure),
+  }
   const [scriptAi, setScriptAi] = useState<{
     scope: 'project' | 'episode'; script: string; apply: (next: string) => void
   } | null>(null)
@@ -163,7 +169,7 @@ export function App() {
     else action()
   }
 
-  async function run<T>(action: () => Promise<Reply<T>>, success?: (value: T) => void, failure?: (message: string) => void) {
+  async function run<T>(action: () => Promise<Reply<T>>, success?: (value: T) => void, failure?: (message: string, code?: ReplyError['code']) => void) {
     if (running.current) return false
     running.current = true
     setBusy(true)
@@ -172,7 +178,7 @@ export function App() {
       const result = await action()
       if (!result.ok) {
         if (result.code === 'upgrade-canceled') return false
-        if (failure) failure(result.error)
+        if (failure) failure(result.error, result.code)
         else setMessage({ text: result.error, error: true })
         return false
       }
@@ -207,12 +213,19 @@ export function App() {
     if (next) setOpened(current => current && ({ ...current, project: next }))
   }
 
-  function edit(change: Mutation, saved?: (next: Project) => void, failure?: (message: string) => void) {
+  function edit(change: Mutation, saved?: (next: Project) => void, failure?: (message: string, code?: ReplyError['code']) => void) {
     if (!opened) return Promise.resolve(false)
     return run(() => api.edit(opened.mediaKey, change), next => {
       accept(next)
       saved?.(next)
     }, failure)
+  }
+
+  function saveScript(change: Extract<Mutation, { type: 'project.edit' | 'episode.edit' }>, onConflict: () => void) {
+    void edit(change, undefined, (text, code) => {
+      if (code === 'project-conflict') onConflict()
+      setMessage({ text, error: true })
+    })
   }
 
   function importMedia(target: MediaTarget) {
@@ -244,6 +257,12 @@ export function App() {
   function inspectOrphans() {
     if (opened) void run(() => api.inspectOrphanMedia(opened.mediaKey), report => setAsk({ kind: 'clean-orphans', report }))
   }
+  function closeOrphanPreview() {
+    if (busy || ask?.kind !== 'clean-orphans') return
+    if (opened) void api.cancelOrphanMedia(opened.mediaKey, ask.report.token).catch(() => {})
+    setAsk(null)
+    setMessage(null)
+  }
   function openDetail(kind: DetailKind, shotToEdit = shot) {
     goTo('shots', () => {
       if (shotToEdit) setShotId(shotToEdit.id)
@@ -271,20 +290,15 @@ export function App() {
   }
 
   function goToScript(scope: typeof scriptScope, action?: () => void) {
-    const open = () => {
-      setDirty(false)
-      setEditorRevision(value => value + 1)
-      setScriptScope(scope)
+    const nextScope = episode ? scope : 'project'
+    goTo('script', () => {
+      setScriptScope(nextScope)
       action?.()
-    }
-    if (tab === 'script' && scriptScope !== scope) navigate(open)
-    else goTo('script', open)
+    }, (episode ? scriptScope : 'project') !== nextScope)
   }
 
   function writeScript() {
-    const scope = episode ? 'episode' : 'project'
-    if (tab === 'script' && scriptScope === scope) setFocusField('script-text')
-    else goToScript(scope, () => setFocusField('script-text'))
+    goToScript(episode ? 'episode' : 'project', () => setFocusField('script-text'))
   }
 
   function selectGuideStep(id: StepId) {
@@ -521,7 +535,7 @@ export function App() {
           }} />
         {tab === 'shots' ? <ShotStage opened={opened} episode={episode} shot={shot} shotIndex={shotIndex} spec={spec}
           method={method} busy={busy} canRender={canRender} playerOpen={Boolean(player)}
-          onOpenEpisodeScript={() => navigate(() => { setScriptScope('episode'); setTab('script'); setDirty(false); setEditorRevision(value => value + 1) })}
+          onOpenEpisodeScript={() => goToScript('episode')}
           onPreview={() => void render('preview')} onRebuildPreview={() => void render('preview', true)} onExport={requestExport} onExportSrt={exportSrt}
           onAddPrimary={() => episode ? addShot() : addEpisode()}
           hasScript={hasScript} onWriteScript={writeScript} onMagpie={() => openMagpieDialog()}
@@ -538,10 +552,11 @@ export function App() {
             hasScript={hasScript} onWriteScript={writeScript} onMagpie={() => openMagpieDialog()} />
           : tab === 'script' ? <ScriptView project={project} episode={episode} scriptScope={scriptScope}
             editorRevision={editorRevision} busy={busy}
-            onSelectScope={scope => navigate(() => { setScriptScope(scope); setDirty(false); setEditorRevision(value => value + 1) })}
+            onSelectScope={goToScript}
             onDirty={setDirty}
-            onSaveProject={(title, script) => void edit({ type: 'project.edit', title, script })}
-            onSaveEpisode={(title, script) => episode && void edit({ type: 'episode.edit', episodeId: episode.id, title, script })}
+            onSaveProject={(title, script, onConflict) => saveScript({ type: 'project.edit', title, script }, onConflict)}
+            onSaveEpisode={(title, script, onConflict) => episode && saveScript({ type: 'episode.edit', episodeId: episode.id, title, script }, onConflict)}
+            onCopyDraft={text => void run(() => api.copy(text), () => setMessage({ text: '草稿已复制' }))}
             onRemoveEpisode={() => episode && remove('删除集数', episode.title, { type: 'episode.remove', episodeId: episode.id })}
             onAiAssist={(scope, script, apply) => setScriptAi({ scope, script, apply })}
             onAiStoryboard={script => openMagpieDialog(script)} />
@@ -572,20 +587,11 @@ export function App() {
       openTool={failure => void run(() => api.openTool(opened.mediaKey, 'planning'), undefined, failure)}
       close={() => { if (!busy) setCreativeDialog(null) }} />}
     {opened && project && (creativeDialog === 'import' || creativeDialog === 'magpie') &&
-      <PlanImportDialog key={creativeDialog} episode={episode} fictional={project.fictional} busy={busy}
-      aiConfig={aiConfig} discoveredModels={discoveredModels}
-      onOpenAiSettings={() => setAiSettingsOpen(true)}
-      onSaveModel={model => {
-        if (model !== aiConfig.model) {
-          void api.setAiConfig({ ...aiConfig, model }).then(reply => {
-            if (reply.ok) setAiConfig(reply.value)
-          }).catch(() => {})
-        }
-      }}
+      <PlanImportDialog key={creativeDialog} project={project} episode={episode} busy={busy} ai={aiPanel}
       source={creativeDialog === 'magpie' ? {
         kind: 'magpie', script: magpieSeedScript ?? (episode?.script || project.script),
-        preview: (model, script, acceptPreview, failure) => void run(
-          () => api.generateMagpiePlan(opened.mediaKey, episode?.id ?? null, model, script), acceptPreview, failure),
+        preview: (target, script, acceptPreview, failure) => void run(
+          () => api.generateMagpiePlan(opened.mediaKey, episode?.id ?? null, target, script), acceptPreview, failure),
         cancel: failure => void api.cancelPlanGeneration(opened.mediaKey).then(reply => {
           if (!reply.ok) failure(reply.error)
         }).catch(() => failure('桌面进程连接中断')),
@@ -600,9 +606,9 @@ export function App() {
       close={() => { if (!busy) { setCreativeDialog(null); setMagpieSeedScript(null) } }} />}
     {opened && project && episode && shot && creativeDialog && creativeDialog !== 'plan' && creativeDialog !== 'import' && creativeDialog !== 'magpie' &&
       <DetailDialog key={shot.id + creativeDialog} project={project} episode={episode} shot={shot} kind={creativeDialog} busy={busy}
-        aiConfig={aiConfig} onOpenAiSettings={() => setAiSettingsOpen(true)}
-        onOptimize={(body, instruction, acceptDraft, failure) => void run(
-          () => api.generateShotDetailDraft(opened.mediaKey, episode.id, shot.id, creativeDialog, body, instruction),
+        ai={aiPanel}
+        onOptimize={(target, body, instruction, acceptDraft, failure) => void run(
+          () => api.generateShotDetailDraft(opened.mediaKey, episode.id, shot.id, creativeDialog, target, body, instruction),
           acceptDraft, failure,
         )}
         onCancelOptimize={failure => void api.cancelPlanGeneration(opened.mediaKey).then(reply => {
@@ -620,11 +626,10 @@ export function App() {
         } : undefined}
         close={() => setCreativeDialog(null)} />}
     {opened && project && scriptAi && <ScriptAiDialog
-      scope={scriptAi.scope} episodeTitle={episode?.title} fictional={project.fictional}
-      currentScript={scriptAi.script} aiConfig={aiConfig} busy={busy}
-      onOpenSettings={() => setAiSettingsOpen(true)}
-      onGenerate={(instruction, acceptDraft, failure) => void run(
-        () => api.generateScriptDraft(opened.mediaKey, scriptAi.scope, episode?.id ?? null, scriptAi.script, instruction),
+      scope={scriptAi.scope} project={project} episode={episode}
+      currentScript={scriptAi.script} ai={aiPanel} busy={busy}
+      onGenerate={(target, instruction, acceptDraft, failure) => void run(
+        () => api.generateScriptDraft(opened.mediaKey, scriptAi.scope, episode?.id ?? null, target, scriptAi.script, instruction),
         acceptDraft, failure,
       )}
       onCancel={failure => void api.cancelPlanGeneration(opened.mediaKey).then(reply => {
@@ -643,18 +648,26 @@ export function App() {
           setAsk(null)
         })}>删除</button></div>
     </Modal>}
-    {ask?.kind === 'clean-orphans' && <Modal title="清理未用素材" onClose={() => { if (!busy) { setAsk(null); setMessage(null) } }}>
-      {ask.report.count === 0
+    {ask?.kind === 'clean-orphans' && <Modal title="清理未用素材" onClose={closeOrphanPreview}>
+      {!ask.stale && (ask.report.count === 0
         ? <p className="orphan-summary">没有未引用的素材文件</p>
-        : <p className="risk"><WarningCircle size={20} />发现 {ask.report.count} 个未引用素材文件（共 {formatBytes(ask.report.bytes)}），清理后无法撤销</p>}
+        : <p className="risk"><WarningCircle aria-hidden="true" size={20} />发现 {ask.report.count} 个未引用素材文件（共 {formatBytes(ask.report.bytes)}），清理后无法撤销</p>)}
+      {ask.report.count > 0 && !ask.stale && <details className="orphan-files" key={ask.report.token}>
+        <summary>候选文件</summary>
+        <ul>{ask.report.files.map(file => <li key={file}>{file}</li>)}</ul>
+      </details>}
       {message?.error && <p className="inline-error" role="alert">{message.text}</p>}
       <div className="dialog-actions">
-        <button type="button" onClick={() => { setAsk(null); setMessage(null) }} disabled={busy}>{ask.report.count === 0 ? '关闭' : '取消'}</button>
-        {ask.report.count > 0 && <button type="button" className="destructive" disabled={busy} onClick={() => {
+        <button type="button" onClick={closeOrphanPreview} disabled={busy}>{ask.report.count === 0 ? '关闭' : '取消'}</button>
+        {ask.stale ? <button type="button" className="primary" disabled={busy} onClick={inspectOrphans}>重新预览</button> :
+          ask.report.count > 0 && <button type="button" className="destructive" disabled={busy} onClick={() => {
           if (!opened) return
-          void run(() => api.cleanOrphanMedia(opened.mediaKey), result => {
+          void run(() => api.cleanOrphanMedia(opened.mediaKey, ask.report.token), result => {
             setAsk(null)
             setMessage({ text: result.count > 0 ? `已清理 ${result.count} 个未引用素材（释放 ${formatBytes(result.bytes)}）` : '没有未引用的素材文件' })
+          }, (text, code) => {
+            if (code === 'orphan-preview-stale') setAsk({ ...ask, stale: true })
+            setMessage({ text, error: true })
           })
         }}>确认清理</button>}
       </div>

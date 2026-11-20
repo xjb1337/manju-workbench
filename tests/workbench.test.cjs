@@ -4,7 +4,7 @@ const { tmpdir } = require('node:os')
 const path = require('node:path')
 const { test } = require('node:test')
 const { folderNameSchema, totalFrames, timecode } = require('../dist/shared/model')
-const { ProjectStore } = require('../dist/main/storage')
+const { OrphanMediaPreviewError, ProjectConflictError, ProjectStore } = require('../dist/main/storage')
 const { RecentProjects } = require('../dist/main/recent-projects')
 const { exportDestination, subtitleText } = require('../dist/main/render')
 const { mediaResponse, rangeFor } = require('../dist/main/media-protocol')
@@ -50,6 +50,7 @@ test('两个存储实例同时编辑时只提交一次，重开后可以继续�
   const results = await Promise.allSettled([first, second].map((store, index) => store.edit({ type: 'episode.add', title: edits[index] })))
   assert.equal(results.filter(result => result.status === 'fulfilled').length, 1)
   const rejected = results.findIndex(result => result.status === 'rejected')
+  assert.ok(results[rejected].reason instanceof ProjectConflictError)
   assert.match(results[rejected].reason.message, /磁盘上的作品已变更/)
   const reopened = await ProjectStore.open(first.root)
   assert.deepEqual(reopened.snapshot.episodes.map(episode => episode.title), [edits[1 - rejected]])
@@ -329,17 +330,105 @@ test('inspectOrphanMedia 与 cleanOrphanMedia 只清理未引用普通文件并�
   await writeFile(hiddenFile, 'secret')
   await mkdir(subDir)
 
-  assert.deepEqual(await store.inspectOrphanMedia(), { count: 2, bytes: 20 })
+  const { token, ...preview } = await store.inspectOrphanMedia()
+  assert.deepEqual(preview, { count: 2, bytes: 20, files: ['orphan-a.png', 'orphan-b.mp4'] })
   assert.ok((await lstat(orphanA)).isFile())
   assert.ok((await lstat(orphanB)).isFile())
 
-  assert.deepEqual(await store.cleanOrphanMedia(), { count: 2, bytes: 20 })
-  assert.deepEqual(await store.inspectOrphanMedia(), { count: 0, bytes: 0 })
+  assert.deepEqual(await store.cleanOrphanMedia(token), { count: 2, bytes: 20 })
+  assert.equal((await store.inspectOrphanMedia()).count, 0)
   await assert.rejects(lstat(orphanA), { code: 'ENOENT' })
   await assert.rejects(lstat(orphanB), { code: 'ENOENT' })
   assert.ok((await lstat(activeFile)).isFile())
   assert.ok((await lstat(hiddenFile)).isFile())
   assert.ok((await lstat(subDir)).isDirectory())
+})
+
+test('清理凭证取消、同名文件替换或预览后新增文件时保留全部素材', async context => {
+  const store = await ProjectStore.create(await workspace(context), '清理确认名单')
+  const orphan = path.join(store.root, 'media', '旧素材.txt')
+  const extra = path.join(store.root, 'media', '新增素材.txt')
+  await writeFile(orphan, 'old')
+  const canceled = await store.inspectOrphanMedia()
+  await store.cancelOrphanMedia(canceled.token)
+  await assert.rejects(store.cleanOrphanMedia(canceled.token), OrphanMediaPreviewError)
+  assert.equal(await readFile(orphan, 'utf8'), 'old')
+
+  const beforeReplacement = await store.inspectOrphanMedia()
+  await writeFile(orphan + '.replacement', 'new')
+  await rename(orphan + '.replacement', orphan)
+  await assert.rejects(store.cleanOrphanMedia(beforeReplacement.token), OrphanMediaPreviewError)
+  assert.equal(await readFile(orphan, 'utf8'), 'new')
+
+  const beforeAddition = await store.inspectOrphanMedia()
+  await writeFile(extra, 'extra')
+  await assert.rejects(store.cleanOrphanMedia(beforeAddition.token), OrphanMediaPreviewError)
+  assert.equal(await readFile(orphan, 'utf8'), 'new')
+  assert.equal(await readFile(extra, 'utf8'), 'extra')
+  const verified = await store.inspectOrphanMedia()
+  await store.cancelOrphanMedia(beforeAddition.token)
+  assert.deepEqual(await store.cleanOrphanMedia(verified.token), { count: 2, bytes: 8 })
+  await assert.rejects(store.cleanOrphanMedia(verified.token), OrphanMediaPreviewError)
+})
+
+test('素材发布至提交（含回滚）期间共用项目锁，清理依据各实例磁盘最新状态', async context => {
+  const writer = await ProjectStore.create(await workspace(context), '素材发布并发')
+  const episodeId = (await writer.edit({ type: 'episode.add', title: '第一集' })).episodes[0].id
+  const shotId = (await writer.edit({ type: 'shot.add', episodeId, title: '镜头' })).episodes[0].shots[0].id
+  const target = { scope: 'shot', episodeId, shotId, kind: 'image' }
+  const cleaner = await ProjectStore.open(writer.root)
+  const media = path.join(writer.root, 'media')
+  const projectFile = path.join(writer.root, 'project.json')
+  const orphan = path.join(media, 'orphan.txt')
+  const image = path.resolve('resources/sample/01.jpg')
+  const { check } = require('proper-lockfile')
+
+  for (const abortCommit of [true, false]) {
+    await writeFile(orphan, 'orphan')
+    const preview = await cleaner.inspectOrphanMedia()
+    const published = Promise.withResolvers()
+    const proceed = Promise.withResolvers()
+    const hook = context.mock.method(require('node:fs/promises'), 'rename', async (source, targetFile) => {
+      if (abortCommit && targetFile === projectFile) throw new Error('模拟提交取消')
+      await rename(source, targetFile)
+      if (path.dirname(targetFile) === media) {
+        published.resolve(targetFile)
+        await proceed.promise
+      }
+    })
+    const importing = writer.importMedia(target, image)
+    const outcome = abortCommit ? assert.rejects(importing, /模拟提交取消/) : importing
+    const newFile = await published.promise
+    let cleaning
+    try {
+      assert.equal(await check(projectFile), true)
+      assert.equal(await lstat(newFile).then(stats => stats.isFile()), true)
+      assert.equal((await ProjectStore.open(writer.root)).snapshot.episodes[0].shots[0].media.image.versions.length, 0)
+      const operation = cleaner.cleanOrphanMedia(preview.token)
+      cleaning = abortCommit ? operation : assert.rejects(operation, OrphanMediaPreviewError)
+    } finally {
+      proceed.resolve()
+    }
+    await outcome
+    const result = await cleaning
+    hook.mock.restore()
+    if (abortCommit) {
+      assert.deepEqual(result, { count: 1, bytes: 6 })
+      await assert.rejects(lstat(newFile), { code: 'ENOENT' })
+    } else {
+      assert.equal(await lstat(newFile).then(stats => stats.isFile()), true)
+      assert.deepEqual((await cleaner.inspectOrphanMedia()).files, ['orphan.txt'])
+    }
+  }
+
+  const beforeSave = await cleaner.inspectOrphanMedia()
+  await writer.edit({ type: 'project.edit', title: writer.snapshot.title, script: '另一个实例保存剧本' })
+  await assert.rejects(cleaner.cleanOrphanMedia(beforeSave.token), OrphanMediaPreviewError)
+  assert.equal(await readFile(orphan, 'utf8'), 'orphan')
+  const afterSave = await cleaner.inspectOrphanMedia()
+  assert.deepEqual(await cleaner.cleanOrphanMedia(afterSave.token), { count: 1, bytes: 6 })
+  const [version] = writer.snapshot.episodes[0].shots[0].media.image.versions
+  assert.equal(await lstat(await writer.assetPath(version)).then(stats => stats.isFile()), true)
 })
 
 test('RecentProjects 支持 theme 与 windowBounds 持久化', async context => {
@@ -392,6 +481,30 @@ test('RecentProjects 支持 aiGateway 预设、地址与模型持久化', async 
   })
 })
 
+test('保存网关设置会校验全部 DNS 结果，拒绝时保留原默认；旧公网设置不影响其他偏好', async context => {
+  const root = await workspace(context)
+  const prefs = await RecentProjects.open(root)
+  await prefs.setTheme('dark')
+  const file = path.join(root, 'workbench-preferences.json')
+  const before = await readFile(file)
+  const config = { preset: 'custom', baseUrl: 'http://gateway.example/v1', model: 'trial' }
+  const lan = { address: '192.168.1.30', family: 4 }
+  await assert.rejects(prefs.setAiGateway({ ...config, baseUrl: 'http://8.8.8.8' }), /仅允许/)
+  await assert.rejects(prefs.setAiGateway(config, async () => [lan, { address: '1.1.1.1', family: 4 }]), /仅允许/)
+  await assert.rejects(prefs.setAiGateway(config, async () => []), /无法确认/)
+  assert.deepEqual(await readFile(file), before)
+  assert.equal(prefs.aiGateway.model, 'group/never-stuck')
+  await prefs.setAiGateway(config, async name => {
+    assert.equal(name, 'gateway.example')
+    return [lan]
+  })
+  assert.deepEqual((await RecentProjects.open(root)).aiGateway, config)
+  await writeFile(file, JSON.stringify({ recent: [], theme: 'dark', aiGateway: { ...config, baseUrl: 'http://8.8.8.8' } }))
+  const reopened = await RecentProjects.open(root)
+  assert.equal(reopened.theme, 'dark')
+  assert.equal(reopened.aiGateway.baseUrl, 'http://127.0.0.1:3425/v1')
+})
+
 test('格式 1 拒绝隐式写入，取消保持字节，确认复制全部素材版本及待合并规划', async context => {
   const { legacyFixture } = require('./legacy-fixture.cjs')
   const parent = await workspace(context)
@@ -407,7 +520,8 @@ test('格式 1 拒绝隐式写入，取消保持字节，确认复制全部素�
   assert.equal(await opened.upgradeCopy(async () => false), null)
   await assert.rejects(opened.edit(brief), /先保留原件/)
   await assert.rejects(opened.importMedia(target, 'resources/sample/03.jpg'), /先保留原件/)
-  await assert.rejects(opened.cleanOrphanMedia(), /先保留原件/)
+  const cleanup = await opened.inspectOrphanMedia()
+  await assert.rejects(opened.cleanOrphanMedia(cleanup.token), /先保留原件/)
   await assert.rejects(opened.recordExport(episode), /先保留原件/)
   await assert.rejects(opened.mergePlan(staged.token, []), /先保留原件/)
   assert.deepEqual(await readdir(parent), [path.basename(root)])
@@ -415,6 +529,7 @@ test('格式 1 拒绝隐式写入，取消保持字节，确认复制全部素�
   assert.deepEqual(await Promise.all(names.map(name => readFile(path.join(root, 'media', name)))), mediaBytes)
 
   const copy = await opened.upgradeCopy(async () => true)
+  await assert.rejects(copy.cleanOrphanMedia(cleanup.token), OrphanMediaPreviewError)
   const reopened = await ProjectStore.open(copy.root)
   assert.deepEqual(reopened.snapshot, { ...snapshot, schemaVersion: 2 })
   const track = reopened.snapshot.episodes[0].shots[0].media.image

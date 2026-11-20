@@ -1,6 +1,8 @@
 import { z } from 'zod'
 import { detailTextSchema } from '../shared/creative'
-import { aiBaseUrlSchema, magpieBaseUrl, magpieModelSchema, type AiConnectionTestResult } from '../shared/plan'
+import { aiBaseUrlSchema, aiCompletionUrl, magpieBaseUrl, magpieModelSchema, type AiConnectionTestResult } from '../shared/plan'
+import { aiRequestBody } from '../shared/prompts'
+import { withAiDispatcher, type GatewayOptions } from './ai-gateway'
 import { parseMagpieDraft } from './plan-import'
 
 const maxCompletionBytes = 4 * 1024 * 1024
@@ -90,7 +92,7 @@ export async function requestChatCompletion(options: {
   signal: AbortSignal
   timeoutMs?: number
   emptyError?: string
-}) {
+} & GatewayOptions) {
   const baseUrl = aiBaseUrlSchema.parse(options.baseUrl ?? magpieBaseUrl)
   const isMagpie = baseUrl === magpieBaseUrl
   const name = gatewayLabel(baseUrl)
@@ -99,24 +101,28 @@ export async function requestChatCompletion(options: {
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (isMagpie) headers.Authorization = 'Bearer magpie'
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      redirect: 'error',
-      signal: requestSignal,
-      headers,
-      body: JSON.stringify({ model: options.model, messages: [{ role: 'user', content: options.prompt }], stream: false }),
+    return await withAiDispatcher(baseUrl, requestSignal, options, async dispatcher => {
+      const request = {
+        method: 'POST',
+        redirect: 'error' as const,
+        signal: requestSignal,
+        headers,
+        body: JSON.stringify(aiRequestBody(options.model, options.prompt)),
+        dispatcher,
+      }
+      const response = await fetch(aiCompletionUrl(baseUrl), request)
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {})
+        throw mapHttpFailure(response.status, baseUrl)
+      }
+      const completion = completionSchema.safeParse(await readJsonResponse(response, maxCompletionBytes, name))
+      if (!completion.success) throw new Error(`${name} 响应格式无法识别，请检查所选模型路由`)
+      const choice = completion.data.choices[0]
+      if (choice.finish_reason === 'length') throw new Error('模型响应被截断，请缩短输入或分段生成')
+      const content = choice.message.content?.trim()
+      if (!content) throw new Error(options.emptyError ?? `模型未返回内容，请尝试其他 ${name} 模型`)
+      return content
     })
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => {})
-      throw mapHttpFailure(response.status, baseUrl)
-    }
-    const completion = completionSchema.safeParse(await readJsonResponse(response, maxCompletionBytes, name))
-    if (!completion.success) throw new Error(`${name} 响应格式无法识别，请检查所选模型路由`)
-    const choice = completion.data.choices[0]
-    if (choice.finish_reason === 'length') throw new Error('模型响应被截断，请缩短输入或分段生成')
-    const content = choice.message.content?.trim()
-    if (!content) throw new Error(options.emptyError ?? `模型未返回内容，请尝试其他 ${name} 模型`)
-    return content
   } catch (error) {
     if (options.signal.aborted) return null
     if (timeout.aborted) throw new Error(`${name} 等待超过 2 分钟，请分段生成或更换模型`)
@@ -126,8 +132,9 @@ export async function requestChatCompletion(options: {
   }
 }
 
-export async function generateMagpiePlan(model: string, prompt: string, signal: AbortSignal, baseUrl = magpieBaseUrl) {
+export async function generateMagpiePlan(model: string, prompt: string, signal: AbortSignal, baseUrl = magpieBaseUrl, gateway: GatewayOptions = {}) {
   const content = await requestChatCompletion({
+    ...gateway,
     baseUrl,
     model,
     prompt,
@@ -140,8 +147,9 @@ export async function generateMagpiePlan(model: string, prompt: string, signal: 
   return episode
 }
 
-export async function generateAiTextDraft(model: string, prompt: string, signal: AbortSignal, baseUrl = magpieBaseUrl) {
+export async function generateAiTextDraft(model: string, prompt: string, signal: AbortSignal, baseUrl = magpieBaseUrl, gateway: GatewayOptions = {}) {
   const content = await requestChatCompletion({
+    ...gateway,
     baseUrl,
     model,
     prompt,
@@ -154,19 +162,39 @@ export async function generateAiTextDraft(model: string, prompt: string, signal:
   return detailTextSchema.parse(cleaned)
 }
 
-export async function testAiGateway(baseUrlInput: string, signal: AbortSignal): Promise<AiConnectionTestResult> {
+export async function testAiGateway(baseUrlInput: string, signal: AbortSignal, gateway: GatewayOptions = {}): Promise<AiConnectionTestResult> {
   const baseUrl = aiBaseUrlSchema.parse(baseUrlInput)
   const name = gatewayLabel(baseUrl)
   const started = Date.now()
   const timeout = AbortSignal.timeout(8_000)
   const requestSignal = AbortSignal.any([signal, timeout])
-  let response: Response
+  const headers: Record<string, string> = baseUrl === magpieBaseUrl ? { Authorization: 'Bearer magpie' } : {}
   try {
-    response = await fetch(`${baseUrl}/models`, {
-      method: 'GET',
-      redirect: 'manual',
-      signal: requestSignal,
-      headers: baseUrl === magpieBaseUrl ? { Authorization: 'Bearer magpie' } : {},
+    return await withAiDispatcher(baseUrl, requestSignal, gateway, async dispatcher => {
+      const request = {
+        method: 'GET',
+        redirect: 'manual' as const,
+        signal: requestSignal,
+        headers,
+        dispatcher,
+      }
+      const response = await fetch(`${baseUrl}/models`, request)
+      const latencyMs = Math.max(1, Date.now() - started)
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => {})
+        return { models: [], latencyMs, modelList: 'unavailable', issue: `/models 返回 HTTP ${response.status}` }
+      }
+      if (response.headers.get('content-type')?.toLowerCase().includes('text/html')) {
+        await response.body?.cancel().catch(() => {})
+        return { models: [], latencyMs, modelList: 'invalid', issue: `/models 返回 HTTP ${response.status} HTML` }
+      }
+      const parsed = modelsSchema.safeParse(await readJsonResponse(response, maxModelsBytes, name).catch(() => undefined))
+      requestSignal.throwIfAborted()
+      if (!parsed.success) {
+        return { models: [], latencyMs, modelList: 'invalid', issue: `/models 返回 HTTP ${response.status}，数据格式无效` }
+      }
+      const models = [...new Set(parsed.data.data.map(item => item.id))].slice(0, 100)
+      return { models, latencyMs, modelList: 'valid' }
     })
   } catch (error) {
     signal.throwIfAborted()
@@ -174,20 +202,4 @@ export async function testAiGateway(baseUrlInput: string, signal: AbortSignal): 
     if (error instanceof TypeError) throw new Error(unreachableMessage(baseUrl))
     throw error
   }
-  const latencyMs = Math.max(1, Date.now() - started)
-  if (!response.ok) {
-    await response.body?.cancel().catch(() => {})
-    return { models: [], latencyMs, modelList: 'unavailable', issue: `/models 返回 HTTP ${response.status}` }
-  }
-  if (response.headers.get('content-type')?.toLowerCase().includes('text/html')) {
-    await response.body?.cancel().catch(() => {})
-    return { models: [], latencyMs, modelList: 'invalid', issue: `/models 返回 HTTP ${response.status} HTML` }
-  }
-  const parsed = modelsSchema.safeParse(await readJsonResponse(response, maxModelsBytes, name).catch(() => undefined))
-  signal.throwIfAborted()
-  if (!parsed.success) {
-    return { models: [], latencyMs, modelList: 'invalid', issue: `/models 返回 HTTP ${response.status}，数据格式无效` }
-  }
-  const models = [...new Set(parsed.data.data.map(item => item.id))].slice(0, 100)
-  return { models, latencyMs, modelList: 'valid' }
 }

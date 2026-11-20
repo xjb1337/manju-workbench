@@ -8,15 +8,16 @@ import { z } from 'zod'
 import type { RenderProgress, RenderResult, Reply } from '../shared/api'
 import { extensions, folderNameSchema, idSchema, mediaTargetSchema, mutationSchema } from '../shared/model'
 import { detailKindSchema, detailTextSchema, frameSpec, generationKindSchema, generationPresets, generationToolUrl } from '../shared/creative'
-import { aiGatewayConfigSchema, aiInstructionSchema, magpieModelSchema, magpieScriptSchema } from '../shared/plan'
+import { aiBaseUrlSchema, aiGatewayConfigSchema, aiInstructionSchema, aiRequestTargetSchema, magpieScriptSchema } from '../shared/plan'
 import { magpiePlanningPrompt, scriptAiPrompt, shotDetailAiPrompt } from '../shared/prompts'
 import { generateAiTextDraft, generateMagpiePlan, testAiGateway } from './magpie'
+import { describeAiGateway } from './ai-gateway'
 import { mediaResponse } from './media-protocol'
 import { exportDestination, renderEpisode, writeEpisodeSrt } from './render'
 import { fillSample, fillVerticalSample } from './sample'
 import { RecentProjects, themeSchema, type WindowBounds } from './recent-projects'
 import { WorkbenchSession } from './session'
-import { findEpisode, findShot, ProjectStore } from './storage'
+import { findEpisode, findShot, OrphanMediaPreviewError, ProjectConflictError, ProjectStore } from './storage'
 import { cleanupStaleTempDirs, staleTempAgeMs, staleTempPrefixes } from './temp-cleanup'
 import { createProductionUpdater } from './update-system'
 import { InvalidUpdatePackageError, ManualUpdateRequiredError, type Updater } from './updater'
@@ -67,6 +68,12 @@ function exportLabel(title: string) {
   return title.replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ').replace(/[. ]+$/, '').slice(0, 80)
 }
 
+function aiRequestTarget(input: unknown) {
+  const target = aiRequestTargetSchema.parse(input)
+  if (target.baseUrl !== recent.aiGateway.baseUrl) throw new Error('AI 网关设置已变化，请重新打开生成面板')
+  return target
+}
+
 function diagnose(error: unknown) {
   if (error instanceof z.ZodError) {
     const issue = error.issues[0]
@@ -92,6 +99,8 @@ function handle<T>(channel: string, fn: (win: BrowserWindow, ...args: unknown[])
       return { ok: true, value: await fn(win, ...args) }
     } catch (error) {
       if (error instanceof UpgradeCanceled) return { ok: false, error: '已取消升级', code: 'upgrade-canceled' }
+      if (error instanceof ProjectConflictError) return { ok: false, error: error.message, code: 'project-conflict' }
+      if (error instanceof OrphanMediaPreviewError) return { ok: false, error: error.message, code: 'orphan-preview-stale' }
       console.error(channel, error)
       if (error instanceof ManualUpdateRequiredError) return { ok: false, error: error.message, code: 'update-manual-required' }
       if (error instanceof InvalidUpdatePackageError) return { ok: false, error: error.message, code: 'update-package-invalid' }
@@ -202,27 +211,32 @@ function wire() {
     }
   }
   handle('ai:get-config', () => recent.aiGateway)
-  handle('ai:set-config', (_win, input) => recent.setAiGateway(aiGatewayConfigSchema.parse(input)))
+  handle('ai:set-config', (_win, input) => workbench.serial(() => recent.setAiGateway(aiGatewayConfigSchema.parse(input))))
+  handle('ai:describe-target', async (_win, input) => {
+    const baseUrl = aiBaseUrlSchema.parse(input)
+    if (baseUrl !== recent.aiGateway.baseUrl) throw new Error('AI 网关设置已变化，请重新打开生成面板')
+    return describeAiGateway(baseUrl)
+  })
   handle('ai:test-connection', (_win, input) => workbench.serial(async () => {
     const config = aiGatewayConfigSchema.parse(input)
     return testAiGateway(config.baseUrl, new AbortController().signal)
   }))
-  handle('plan:generate-magpie', (_win, key, episodeInput, modelInput, scriptInput) => workbench.serial(async () => {
+  handle('plan:generate-magpie', (_win, key, episodeInput, targetInput, scriptInput) => workbench.serial(async () => {
     const store = workbench.getStore(key)
     const episodeId = idSchema.nullable().parse(episodeInput)
-    const model = magpieModelSchema.parse(modelInput)
+    const { baseUrl, model, network } = aiRequestTarget(targetInput)
     const script = magpieScriptSchema.parse(scriptInput)
     const project = store.snapshot
     const episode = episodeId ? findEpisode(project, episodeId) : undefined
     if (!episode && project.episodes.length) throw new Error('请先选择要生成分镜的集数')
     return runCancellableAi(key, async signal => {
-      const draft = await generateMagpiePlan(model, magpiePlanningPrompt(project, episode, script), signal, recent.aiGateway.baseUrl)
+      const draft = await generateMagpiePlan(model, magpiePlanningPrompt(project, episode, script), signal, baseUrl, { network })
       if (!draft || signal.aborted) return null
       const staged = episode ? { shots: draft.shots } : { title: draft.title, shots: draft.shots, script }
       return await store.previewPlan(episodeId, JSON.stringify({ schemaVersion: 1, episode: staged }), 'magpie')
     })
   }))
-  handle('ai:generate-shot-detail', (_win, key, episodeInput, shotInput, kindInput, bodyInput, instructionInput) => workbench.serial(async () => {
+  handle('ai:generate-shot-detail', (_win, key, episodeInput, shotInput, kindInput, targetInput, bodyInput, instructionInput) => workbench.serial(async () => {
     const store = workbench.getStore(key)
     const episodeId = idSchema.parse(episodeInput)
     const shotId = idSchema.parse(shotInput)
@@ -232,12 +246,12 @@ function wire() {
     const project = store.snapshot
     const episode = findEpisode(project, episodeId)
     const shot = findShot(project, episodeId, shotId)
-    const { baseUrl, model } = recent.aiGateway
+    const { baseUrl, model, network } = aiRequestTarget(targetInput)
     return runCancellableAi(key, signal => generateAiTextDraft(
-      model, shotDetailAiPrompt(project, episode, shot, kind, body, instruction), signal, baseUrl,
+      model, shotDetailAiPrompt(project, episode, shot, kind, body, instruction), signal, baseUrl, { network },
     ))
   }))
-  handle('ai:generate-script', (_win, key, scopeInput, episodeInput, scriptInput, instructionInput) => workbench.serial(async () => {
+  handle('ai:generate-script', (_win, key, scopeInput, episodeInput, targetInput, scriptInput, instructionInput) => workbench.serial(async () => {
     const store = workbench.getStore(key)
     const scope = z.enum(['project', 'episode']).parse(scopeInput)
     const episodeId = idSchema.nullable().parse(episodeInput)
@@ -246,9 +260,9 @@ function wire() {
     const project = store.snapshot
     const episode = scope === 'episode' ? (episodeId ? findEpisode(project, episodeId) : undefined) : undefined
     if (scope === 'episode' && !episode) throw new Error('请先选择要辅助编写的集数')
-    const { baseUrl, model } = recent.aiGateway
+    const { baseUrl, model, network } = aiRequestTarget(targetInput)
     return runCancellableAi(key, signal => generateAiTextDraft(
-      model, scriptAiPrompt(project, scope, episode, script, instruction), signal, baseUrl,
+      model, scriptAiPrompt(project, scope, episode, script, instruction), signal, baseUrl, { network },
     ))
   }))
   handle('plan:cancel-generation', (_win, key) => {
@@ -276,7 +290,8 @@ function wire() {
     return project
   }))
   handle('media:inspect-orphans', (_win, key) => workbench.serial(() => workbench.getStore(key).inspectOrphanMedia()))
-  handle('media:clean-orphans', (win, key) => workbench.serial(async () => (await writableProject(win, key)).cleanOrphanMedia()))
+  handle('media:cancel-orphans', (_win, key, token) => workbench.serial(() => workbench.getStore(key).cancelOrphanMedia(token)))
+  handle('media:clean-orphans', (win, key, token) => workbench.serial(async () => (await writableProject(win, key)).cleanOrphanMedia(token)))
   handle('app:copy', (_win, text) => {
     clipboard.writeText(z.string().max(64 * 1024 * 1024).parse(text))
     return null
